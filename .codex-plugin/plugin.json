@@ -1,0 +1,44 @@
+{
+  "name": "bounty",
+  "version": "1.0.0",
+  "description": "Competitive multi-agent bug bounty for Codex: specialists hunt, vote, fix, and score claims.",
+  "author": {
+    "name": "Moogento",
+    "email": "jim@moogento.com",
+    "url": "https://github.com/moogento"
+  },
+  "homepage": "https://github.com/moogento/bounty",
+  "repository": "https://github.com/moogento/bounty",
+  "license": "MIT",
+  "keywords": [
+    "bug-bounty",
+    "code-review",
+    "multi-agent",
+    "bug-hunt",
+    "codex"
+  ],
+  "skills": "./codex-skills/",
+  "interface": {
+    "displayName": "Bounty",
+    "shortDescription": "Competitive multi-agent bug discovery for Codex",
+    "longDescription": "Launch a competitive bug hunt across a codebase. Recon maps the terrain, specialists submit claims, peers vote down weak findings, and confirmed issues can be fixed and reviewed before shipping.",
+    "developerName": "Moogento",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/moogento/bounty",
+    "privacyPolicyURL": "https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement",
+    "termsOfServiceURL": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+    "defaultPrompt": [
+      "Run the bounty skill on this repo and hunt for medium-severity bugs.",
+      "Use bounty in report-only mode on src/payments.",
+      "Use bounty-cleanup to remove old bounty state and branches."
+    ],
+    "brandColor": "#F59E0B",
+    "composerIcon": "./assets/bounty-small.svg",
+    "logo": "./assets/bounty-small.svg",
+    "screenshots": []
+  }
+}

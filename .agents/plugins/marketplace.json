@@ -1,0 +1,20 @@
+{
+  "name": "moogento",
+  "interface": {
+    "displayName": "Moogento"
+  },
+  "plugins": [
+    {
+      "name": "bounty",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bounty"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Coding"
+    }
+  ]
+}

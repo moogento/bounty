@@ -2,7 +2,7 @@
 
 # bounty
 
-A Claude Code plugin that turns a crew of agents loose on your codebase to bring back bugs. Eight specialists sail out under their own flag, each hunting through a different lens, then argue over each other's hauls. Real finds pay out. Shallow claims cost three. Whatever survives the shouting gets patched up and shipped as a single PR.
+A Claude Code plugin, now with a Codex port, that turns a crew of agents loose on your codebase to bring back bugs. Eight specialists sail out under their own flag, each hunting through a different lens, then argue over each other's hauls. Real finds pay out. Shallow claims cost three. Whatever survives the shouting gets patched up and shipped as a single PR.
 
 For fixing a *known* bug, use [`zap`](https://github.com/obra/zap) - `bounty` is for the ones you haven't spotted yet.
 
@@ -78,6 +78,8 @@ Claude will figure out the scope and kick off the hunt.
 
 ## Install
 
+### Claude Code
+
 ```
 /plugin marketplace add https://github.com/moogento/bounty.git
 /plugin install bounty@bounty
@@ -86,6 +88,35 @@ Claude will figure out the scope and kick off the hunt.
 Restart Claude Code. `/bounty` and `/bounty-cleanup` are available in every project.
 
 Developing locally? Clone the repo and run `/plugin marketplace add <path-to-clone>` from the project root instead.
+
+### Codex
+
+This repo now ships both:
+
+- a direct Codex plugin manifest at `.codex-plugin/plugin.json`
+- a repo-local marketplace entry at `.agents/plugins/marketplace.json` that points to `./plugins/bounty`
+
+Add the repo to Codex as a marketplace:
+
+```bash
+codex marketplace add https://github.com/moogento/bounty.git
+```
+
+For local development:
+
+```bash
+codex marketplace add <path-to-clone>
+```
+
+Then invoke it in natural language:
+
+```text
+Use the bounty skill on this repo
+Run bounty in report-only mode over src/payments
+Use bounty-cleanup but keep the audit trail
+```
+
+Codex does not use slash commands here. The entrypoints are the `bounty` and `bounty-cleanup` skills.
 
 ## What Winning Looks Like
 
@@ -161,12 +192,32 @@ Removes worktrees, deletes merged `bounty/*` branches, clears `.temp/bounty/`. P
 
 ```
 bounty/
+├── .agents/plugins/
+│   └── marketplace.json
+├── .codex-plugin/
+│   └── plugin.json
 ├── .claude-plugin/
 │   ├── plugin.json
 │   └── marketplace.json
 ├── assets/
 │   ├── banner.svg
+│   ├── bounty-small.svg
 │   └── flow.svg
+├── codex-skills/
+│   ├── bounty/
+│   │   └── SKILL.md
+│   └── bounty-cleanup/
+│       └── SKILL.md
+├── plugins/bounty/
+│   ├── .codex-plugin/
+│   │   └── plugin.json
+│   ├── assets/
+│   │   └── bounty-small.svg
+│   └── skills/
+│       ├── bounty/
+│       │   └── SKILL.md
+│       └── bounty-cleanup/
+│           └── SKILL.md
 ├── commands/
 │   ├── bounty.md
 │   └── bounty-cleanup.md
