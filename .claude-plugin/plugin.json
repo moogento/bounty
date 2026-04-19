@@ -2,7 +2,10 @@
   "name": "bounty",
   "version": "1.0.0",
   "description": "Competitive multi-agent bug bounty — agents hunt, vote, fix, and earn points",
-  "author": "Moogento",
+  "author": {
+    "name": "Moogento",
+    "email": "jim@moogento.com"
+  },
   "skills": "./skills",
   "commands": "./commands"
 }
