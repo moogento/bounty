@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "bounty",
+  "metadata": {
+    "description": "Competitive multi-agent bug bounty"
+  },
+  "owner": {
+    "name": "Moogento",
+    "email": "jim@moogento.com"
+  },
+  "plugins": [
+    {
+      "name": "bounty",
+      "description": "Discover bugs via competitive multi-agent scoring: specialist lenses hunt, vote on each other's claims, fix survivors, and earn points. False positives penalized.",
+      "version": "1.0.0",
+      "source": "./"
+    }
+  ]
+}
