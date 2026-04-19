@@ -24,6 +24,8 @@ Collect:
 git worktree list
 git branch --list 'bounty/*'
 ls -la .temp/bounty
+ls -la .temp/bounty/plans .temp/bounty/reviews .temp/bounty/fixes 2>/dev/null
+find . -maxdepth 2 -name '.temp.bounty*' -o -name 'bounty-*.tmp' 2>/dev/null
 ```
 
 If `.temp/bounty/` does not exist, continue. Cleanup may still be needed for branches or worktrees.
@@ -69,15 +71,23 @@ done
 
 For unmerged branches, ask first. Only use `git branch -D` after the user confirms.
 
-## Step 5: Remove state directory
+## Step 5: Remove state directory and stray temp files
 
-Unless the user asked to keep state:
+Unless the user asked to keep state, delete the full bounty state directory — this covers all subdirectories the run may have written (`claims/`, `votes/`, `plans/`, `fixes/`, `reviews/`) plus root files (`config.json`, `bundles.json`, `queue.json`, `leaderboard.json`, `recon.md`, `README.md`):
 
 ```bash
 rm -rf .temp/bounty
 ```
 
-If state is preserved, say so explicitly.
+Then sweep for stray temp files that atomic writes or interrupted runs can leave behind (the write pattern is `mktemp .temp/bounty/<name>.XXXX`, but a crash mid-rename can drop them at the repo root or in `/tmp`):
+
+```bash
+find . -maxdepth 2 -name '.temp.bounty*' -type f -delete 2>/dev/null
+find . -maxdepth 2 -name 'bounty-*.tmp' -type f -delete 2>/dev/null
+rm -f /tmp/bounty-*.tmp 2>/dev/null
+```
+
+If `--keep-state` was given, skip all of the above and say so explicitly in the output.
 
 ## Step 6: Verify
 
@@ -87,7 +97,10 @@ Run:
 git worktree list
 git branch --list 'bounty/*' | wc -l
 ls -la .temp/bounty 2>/dev/null || echo "state directory cleared"
+find . -maxdepth 2 \( -name '.temp.bounty*' -o -name 'bounty-*.tmp' \) 2>/dev/null
 ```
+
+The find output should be empty. If anything remains, name it in the report.
 
 ## Output
 
@@ -96,4 +109,5 @@ Report:
 - worktrees removed
 - merged branches deleted
 - unmerged branches left in place
-- whether `.temp/bounty/` was cleared or preserved
+- whether `.temp/bounty/` was cleared or preserved (call out `plans/`, `fixes/`, and `reviews/` explicitly so the user knows planner output is gone)
+- any stray temp files removed or left behind

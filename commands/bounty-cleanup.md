@@ -55,15 +55,23 @@ done
 # for b in …; do git branch -D "$b"; done
 ```
 
-## Step 5: Remove state directory
+## Step 5: Remove state directory and stray temp files
 
-Unless `--keep-state` was given:
+Unless `--keep-state` was given, clear the full bounty state tree — this covers `claims/`, `votes/`, `plans/`, `fixes/`, `reviews/`, `bundles.json`, `queue.json`, `leaderboard.json`, `recon.md`, and any other files the run wrote:
 
 ```bash
 rm -rf .temp/bounty
 ```
 
-If `--keep-state` was given, leave `.temp/bounty/` intact so the user can audit the run later.
+Sweep for stray temp files from atomic writes or interrupted runs:
+
+```bash
+find . -maxdepth 2 -name '.temp.bounty*' -type f -delete 2>/dev/null
+find . -maxdepth 2 -name 'bounty-*.tmp' -type f -delete 2>/dev/null
+rm -f /tmp/bounty-*.tmp 2>/dev/null
+```
+
+If `--keep-state` was given, skip all of the above and leave `.temp/bounty/` intact so the user can audit the run later.
 
 ## Step 6: Verify
 
@@ -71,7 +79,10 @@ If `--keep-state` was given, leave `.temp/bounty/` intact so the user can audit 
 git worktree list
 git branch --list 'bounty/*' | wc -l
 ls -la .temp/bounty 2>/dev/null || echo "state directory cleared"
+find . -maxdepth 2 \( -name '.temp.bounty*' -o -name 'bounty-*.tmp' \) 2>/dev/null
 ```
+
+The `find` output should be empty. If anything remains, name it in the report.
 
 ## Output
 
@@ -79,4 +90,5 @@ Report:
 - Worktrees removed
 - Merged branches deleted
 - Unmerged branches left (if any) with a reminder that they are the user's to decide on
-- Whether state was cleared or preserved
+- Whether state was cleared or preserved (call out `plans/`, `fixes/`, and `reviews/` explicitly so the user knows planner output is gone)
+- Any stray temp files removed or left behind

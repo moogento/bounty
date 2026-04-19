@@ -28,12 +28,17 @@ Parse the user request for these optional flags or settings:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--scope <path>` | repo root | Restrict the hunt to a directory or glob |
-| `--agents N` | 8 | Number of specialist agents, 3-12 |
+| `--agents N` | 8 | Number of specialist lenses in play, 3-12 |
+| `--hunters-per-lens K` | 1 | Hunters dispatched per lens; ≥2 treats collisions as validation |
 | `--severity <floor>` | `medium` | Discard claims below this severity |
 | `--max-claims N` | 40 | Cap total claims so the run stays bounded |
 | `--no-fix` | false | Skip fix/review/ship and stop at findings |
+| `--voting-mode <mode>` | `auto` | `full` = N−1 voters per claim. `panel` = 1 voter per specialty reviews every non-own claim. `auto` = `full` when claims ≤ 20, else `panel` |
+| `--max-fixes N` | 10 | If confirmed count exceeds, Phase 4 pauses for user to confirm/curate the bundle plan |
+| `--max-bundles N` | 6 | Cap on Phase-4 bundles |
 | `--model-hunt <model>` | `gpt-5.4-mini` | Preferred model for recon, hunting, and voting |
-| `--model-fix <model>` | `gpt-5.4` | Preferred model for fix proposals |
+| `--model-plan <model>` | `gpt-5.4` | Preferred model for bundle planners |
+| `--model-fix <model>` | `gpt-5.4-mini` | Preferred model for bundle implementers |
 
 If no scope is given, ask once whether to hunt the whole repo or a narrower module.
 
@@ -51,12 +56,20 @@ If no scope is given, ask once whether to hunt the whole repo or a narrower modu
 Create the state directory:
 
 ```bash
-mkdir -p .temp/bounty/{claims,votes,fixes}
+mkdir -p .temp/bounty/{claims,votes,fixes,plans,reviews}
 ```
+
+**Resolve the absolute state directory path** and store it as `state_dir` in `.temp/bounty/config.json`. Codex worker subagents can run in sandboxed directories — pass `STATE_DIR=<absolute>` in every dispatched prompt so outputs are serialized back to the main repo's state dir, never into a sandbox.
 
 Write `.temp/bounty/config.json` using the schema from `../../skills/bounty/references/state-schema.md`, with the resolved arguments plus `"runtime": "codex"`.
 
 Write `.temp/bounty/leaderboard.json` with zeroed scores for the chosen specialists. Use temp-file plus rename for atomic writes.
+
+**Probe the voter-tier model** before the hunt: fire one throwaway call at `$MODEL_VOTE` and catch a rate-limit / usage-cap error. If it fires, warn the user:
+
+```
+⚠ voter model returned a rate-limit on probe; Phase 3 will fall back to the hunt-tier model for voting.
+```
 
 ## Live progress output
 
@@ -72,11 +85,14 @@ Rules that apply to every phase below:
 
 1. Wait on background subagents incrementally, not as one big blocking batch. Use `wait_agent` on the outstanding agent ids with a short timeout, process whichever agent finishes first, then continue with the remaining set.
 2. Print a one-liner per event as it lands. Use compact formats:
-   - New claim: `🛡️ Security → BUG-003  high  sql-injection  app/Http/Orders.php:142`
+   - New claim: `🛡️ Security/1 → BUG-003  high  sql-injection  app/Http/Orders.php:142`
+   - Collision: `🛡️ Security/2 collided with 🛡️ Security/1 on BUG-003  (collision_count = 2)`
    - New vote: `BUG-003  ✓ VALID  from 🧵 Concurrency  (sanitizer bypassed upstream)`
    - Claim resolved: `BUG-003 CONFIRMED (4 VALID / 1 FP / 2 abstain)  finder +1 → 🛡️ Security`
-   - Fix completed: `BUG-003 fixed by 🛡️ Security  (2 files, test added, phpunit ✓)`
-   - Fix review: `BUG-003  APPROVE from 🧵  APPROVE from ⚡  → kept, fixer +1`
+   - Bundle planned: `📦 fix-acl  3 bugs  test_strategy=tdd  reviewer=haiku`
+   - Plan written: `📋 plans/fix-acl.md written  3 bugs  commit_order=[…]`
+   - Fix committed: `BUG-003 (fix-acl) committed  (2 files, test added, phpunit ✓)`
+   - Bundle reviewed: `fix-acl  3/3 APPROVE from 🧵  → kept, implementer +3`
 3. Re-render the running leaderboard on every scoring change: new confirmation, false positive, or fix approval. Prefix it with `— leaderboard @ <phase> —`.
 4. Never compress multiple new events into a single summary line. If three claims are accepted from one hunter result, print three claim lines.
 5. If no agent completes for roughly 20-30 seconds, emit a short heartbeat update that names the phase and the remaining agent count, then keep waiting.
@@ -97,20 +113,29 @@ Its job:
 - list obvious coverage gaps
 - produce a markdown report with sections: Modules, Boundaries, Recent churn, Coverage gaps, Suspicion heatmap
 
-Time-box recon to roughly five minutes of effort. Save the returned report to `.temp/bounty/recon.md`.
+**Scale the time budget by scope size**: `budget_minutes = max(5, ceil(files_in_scope / 100))`. Record the chosen budget as `recon_budget_minutes` in `config.json`. Save the returned report to `$STATE_DIR/recon.md`.
 
 ## Phase 2: The hunt
 
 Assign each of `N` hunters one specialist lens from `../../skills/bounty/references/agent-specialties.md`.
 
+When `--hunters-per-lens K > 1`, dispatch **K hunters per lens** as a single flat parallel wave (total = N×K agents). Each hunter in a lens receives a distinct **prompt seed** so they take different paths through the code:
+
+- seed 1: breadth-first from the top of the module tree
+- seed 2: follow high-churn files from the recon report
+- seed 3: follow coverage gaps from the recon report
+
+Collisions between hunters on the same lens are the validation signal. Record them as Phase 2 proceeds.
+
 Dispatch the hunters in parallel as read-heavy subagents. Prefer:
 
 - `agent_type: "explorer"`
-- model `gpt-5.4-mini` or the configured hunt model
+- model `gpt-5.4-mini` or the configured hunt model (all seeds on the same tier; second/third hunters exist to cross-check cheaply, not to deepen)
 
 Each hunter receives:
 
 - their specialist lens and concrete patterns
+- the prompt seed (if K>1) — as a starting point, not a cage
 - the resolved scope
 - the recon report
 - the severity floor
@@ -118,8 +143,10 @@ Each hunter receives:
 
 Each hunter must:
 
-- scan their lens first, then broaden if needed
+- scan their lens from the seed entry point first, then broaden
 - verify evidence from code before making a claim
+- **respect a tool-call budget** — cap read-style calls at ~20 per hunter; if they need more, the scope is too wide, submit what they have
+- **hard stop** the moment 5 claims are filed; do not keep exploring past that
 - return at most 5 claims as JSON objects in the final message
 - stop after 5 claims or roughly 10 minutes of effort
 
@@ -139,11 +166,22 @@ The orchestrator then:
 
 - validates every returned claim
 - computes the fingerprint `sha256(normalized_file + ":" + category + ":" + (line // 10))`
-- writes accepted claims to `.temp/bounty/claims/BUG-<lens>-<seq>.json`
+- writes accepted claims to `.temp/bounty/claims/BUG-<lens>-<seed>-<seq>.json`
 - merges duplicates by fingerprint and records later submissions in `co_discovered_by`
+- increments `collision_count` on the surviving claim each time a duplicate lands; emits a `collided` one-liner live
 - enforces `--max-claims` by keeping the highest-severity claims first
 
 ## Phase 3: Voting
+
+Resolve the voting mode from `--voting-mode` first. Announce it at phase start:
+
+- `full` — for each claim, dispatch `N−1` voter subagents (independent verdicts per claim). Use when `surviving_claims ≤ 20`.
+- `panel` — dispatch one voter subagent per specialty; each reviews every claim not authored by its own lens and returns verdicts for all of them in a single structured return. The orchestrator serializes each voter's return into `$STATE_DIR/votes/VOTER-<lens>.jsonl` (one line per verdict). Use when `surviving_claims > 20`.
+- `auto` (default) — resolve at runtime based on claim count.
+
+If the voter-tier model rate-limits, announce once and fall back to `$MODEL_HUNT` for voting; persist the fallback in `config.json` as `model_vote_effective`.
+
+### Full-mode voting
 
 For each surviving claim, collect verdicts from the other `N-1` specialists. Process claims in batches of 5 so the run stays bounded.
 
@@ -178,72 +216,106 @@ The orchestrator appends every vote to `.temp/bounty/votes/<BUG-ID>.jsonl`, tall
 
 Do not wait for the end of the batch to update the visible standings. The leaderboard update happens claim-by-claim.
 
-## Phase 4: Fix queue
+## Phase 4: Bundled fixes
 
 Skip this phase when `--no-fix` is set.
 
-Build `.temp/bounty/queue.json` from confirmed bugs and apply the severity policy from the shared references:
+Instead of one fixer per bug, Phase 4 runs a **plan → implement → review** pipeline over bundles. For 30+ confirmed bugs this is the difference between ~90 model calls and ~18.
 
-- `low`, `medium`, `high`: eligible for fixes
+### Volume gate
+
+Before dispatching planners, check `confirmed_count` against `--max-fixes` (default 10). If exceeded, ping the user with the bundle plan and **wait up to 3 minutes** — do not block indefinitely. Options: `all` / `high-only` / `pick <slugs>` / `abort`. On reply, honor the choice and record `user_fix_scope` in `config.json`. On timeout, record `user_fix_scope: "all"` with `gate_timeout: true`, announce the timeout, and continue with every bundle. Skip the gate entirely when `confirmed_count ≤ max_fixes`.
+
+Severity policy:
+
+- `low`, `medium`, `high`: eligible for bundled fixes
 - `critical`: do not auto-fix; open a GitHub issue if GitHub access is available, otherwise record the blocker clearly in the final report
 
-For fixable bugs, prefer up to 3 fixer subagents in parallel:
+### Step 4a: Bundle confirmed bugs
+
+Cluster fixable bugs and write `.temp/bounty/bundles.json`. Default heuristic:
+
+1. One bundle per lens with ≥2 confirmed bugs.
+2. Lone-bug lenses merge into a `misc` bundle alongside adjacent lenses.
+3. Cap at `--max-bundles` (default 6); merge smallest first when exceeded.
+4. Each bundle has a kebab-slug name (e.g. `fix-acl`, `fix-fail-open`, `fix-concurrency`, `fix-nullsafety-misc`).
+
+### Step 4b: Plan
+
+Dispatch **one planner subagent per bundle** in parallel:
 
 - `agent_type: "worker"`
-- model `gpt-5.4` or the configured fix model
+- model `gpt-5.4` or the configured plan model
 
-Each fixer gets:
+Each planner gets the bundle name, every bug claim in the bundle, the recon report, and repo contribution rules.
 
-- the claim JSON
-- the recon report
-- the relevant code excerpt
-- repo-specific contribution rules if present, such as `CLAUDE.md`, `AGENTS.md`, or other local guidance files
+Each planner must return a markdown plan with YAML frontmatter:
 
-Each fixer must return:
+```
+---
+bundle: fix-acl
+test_strategy: tdd          # tdd | architectural — picks reviewer model
+commit_order: [BUG-authz-1-001, BUG-authz-1-002]
+---
 
-- a minimal patch or a precise edit plan the orchestrator can apply
-- whether a regression test was added
-- validation notes and commands run
+# <bundle> plan
+## BUG-authz-1-001 — …
+- Proposed fix: …
+- Test stance: …
+- Dependencies: …
+```
 
-### Live progress during fixes
+Planners **must not produce code edits**. The orchestrator validates that the returned plan has no patch/diff content; if it does, the plan is rejected and that bundle falls back to per-bug fixing.
 
-Treat each completed fixer as its own live event.
+The orchestrator writes the plan to `.temp/bounty/plans/<bundle>.md` and prints a plan-written one-liner.
 
-1. Keep a set of outstanding fixer agent ids for the current batch.
-2. Use `wait_agent` incrementally so you process whichever fixer finishes first.
-3. As soon as a fixer returns something usable, integrate it, write `.temp/bounty/fixes/<BUG-ID>.json`, and print the fix-completed one-liner.
-4. When a fix later clears review, re-render the leaderboard immediately rather than waiting for the end of all fixes.
+Process planners incrementally via `wait_agent` so each plan becomes available as soon as it's ready.
+
+### Step 4c: Implement
+
+After all plans are written, dispatch **one implementer subagent per bundle**:
+
+- `agent_type: "worker"`
+- model `gpt-5.4-mini` or the configured fix model
+- each gets its bundle's plan (verbatim), the claim JSONs, the recon report, and project validation commands
+
+Each implementer must walk `commit_order` one bug at a time:
+
+- when `test_strategy: tdd`, write the failing test first, then the fix
+- produce a minimal patch or a precise edit plan per bug; one commit per bug, never squashed
+- commit message follows the repo `<module>: <benefit>` format; reference the BUG-ID in the body
+- if a bug cannot pass validation, mark it `status: "skipped"` with a reason and continue the bundle
+- return a per-bug report the orchestrator serializes to `.temp/bounty/fixes/<BUG-ID>.json`
 
 The orchestrator owns integration:
 
-- apply or recreate the fix locally
-- run the relevant validation
-- write `.temp/bounty/fixes/<BUG-ID>.json`
-- commit on `bounty/<BUG-ID>-<kebab-slug>` when the fix is accepted
+- apply the returned patch/edits in the bundle's worktree on branch `bounty/<bundle>`
+- run project validation after each applied bug
+- write `.temp/bounty/fixes/<BUG-ID>.json` and print the fix-committed one-liner
+- commit on the bundle branch only when the per-bug validation passes
 
-## Phase 5: Fix review and ship
+## Phase 5: Bundle review and ship
 
-For every completed fix, collect two reviewer verdicts from agents other than the finder and fixer.
+For each completed bundle, dispatch **one reviewer subagent** — not the planner or implementer of that bundle, and not a bug's original finder when avoidable:
 
-Reviewers inspect:
+- `haiku`-tier model when the bundle's plan frontmatter says `test_strategy: tdd`
+- `sonnet`-tier (`gpt-5.4`) when `test_strategy: architectural`
 
-- the claim JSON
-- the proposed patch or diff
-- the validation output
+The reviewer gets the plan, the patches/diffs for every per-bug commit on the bundle branch, and the validation output. It returns one verdict per bug (`APPROVE` / `REJECT` with a one-sentence reason). The orchestrator writes `.temp/bounty/reviews/<bundle>.json`.
 
-Process reviewer completions incrementally as well. When the second reviewer for a fix completes, resolve that fix immediately, print the fix-review one-liner, and update the leaderboard if the fix is kept.
+Process reviewers incrementally via `wait_agent`; the moment a bundle's review lands, resolve it and re-render the leaderboard.
 
-Resolution:
+Resolution per bug:
 
-- `2/2 APPROVE`: keep the fix and award the fixer `+1`
-- any rejection: give one different fixer one more attempt, then abandon if it still does not pass review
+- `APPROVE`: keep the commit; implementer gets `+1`
+- `REJECT`: revert that single commit on the bundle branch; the bug goes back to the queue for one isolated per-bug retry (opus/`gpt-5.4`), then abandoned if it rejects again
 
-After approvals:
+After review:
 
 - create an aggregate branch `bounty/run-<YYYYMMDD-HHMM>`
-- cherry-pick approved fix commits onto it
+- merge each bundle branch that retained at least one commit (`--no-ff --no-squash`) — per-bug commits are the audit trail, never squashed
 - run aggregate validation
-- if aggregate validation fails, identify and drop the offending fix before creating the PR
+- if aggregate validation fails, bisect and drop the offending commit before creating the PR
 
 Use `gh` or the GitHub connector when available to create:
 
