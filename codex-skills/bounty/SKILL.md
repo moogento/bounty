@@ -169,6 +169,7 @@ The orchestrator then:
 - writes accepted claims to `.temp/bounty/claims/BUG-<lens>-<seed>-<seq>.json`
 - merges duplicates by fingerprint and records later submissions in `co_discovered_by`
 - increments `collision_count` on the surviving claim each time a duplicate lands; emits a `collided` one-liner live
+- runs a **secondary semantic-dedup pass** over surviving claims: buckets by `(normalize(file), line // 10)` ignoring category, and for any bucket with ≥2 claims from different specialties, merges them (keep highest-severity as survivor, append others' finders to `co_discovered_by`, increment `collision_count`, record merged categories). Emits a semantic-merge one-liner, e.g. `🔗 semantic merge: BUG-authz-1-001 + BUG-security-1-004 → surviving BUG-security-1-004`
 - enforces `--max-claims` by keeping the highest-severity claims first
 
 ## Phase 3: Voting
