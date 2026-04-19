@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bounty Cleanup"
+  short_description: "Clean bounty branches, worktrees, and state"
+  default_prompt: "Use $bounty-cleanup to remove old bounty worktrees and state without touching unrelated work."

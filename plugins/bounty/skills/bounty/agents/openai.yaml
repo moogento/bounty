@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bounty"
+  short_description: "Competitive multi-agent bug discovery"
+  default_prompt: "Use $bounty to scan this repo for unknown medium-severity bugs."

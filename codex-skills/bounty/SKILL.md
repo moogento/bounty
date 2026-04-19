@@ -36,7 +36,8 @@ Parse the user request for these optional flags or settings:
 | `--voting-mode <mode>` | `auto` | `full` = N−1 voters per claim. `panel` = 1 voter per specialty reviews every non-own claim. `auto` = `full` when claims ≤ 20, else `panel` |
 | `--max-fixes N` | 10 | If confirmed count exceeds, Phase 4 pauses for user to confirm/curate the bundle plan |
 | `--max-bundles N` | 6 | Cap on Phase-4 bundles |
-| `--model-hunt <model>` | `gpt-5.4-mini` | Preferred model for recon, hunting, and voting |
+| `--model-hunt <model>` | `gpt-5.4-mini` | Preferred model for recon and hunting |
+| `--model-vote <model>` | `gpt-5.4-mini` | Preferred model for voting; falls back to `--model-hunt` if it rate-limits |
 | `--model-plan <model>` | `gpt-5.4` | Preferred model for bundle planners |
 | `--model-fix <model>` | `gpt-5.4-mini` | Preferred model for bundle implementers |
 
@@ -89,7 +90,7 @@ Rules that apply to every phase below:
    - Collision: `🛡️ Security/2 collided with 🛡️ Security/1 on BUG-003  (collision_count = 2)`
    - New vote: `BUG-003  ✓ VALID  from 🧵 Concurrency  (sanitizer bypassed upstream)`
    - Claim resolved: `BUG-003 CONFIRMED (4 VALID / 1 FP / 2 abstain)  finder +1 → 🛡️ Security`
-   - Bundle planned: `📦 fix-acl  3 bugs  test_strategy=tdd  reviewer=haiku`
+   - Bundle planned: `📦 fix-acl  3 bugs  test_strategy=tdd  reviewer=gpt-5.4-mini`
    - Plan written: `📋 plans/fix-acl.md written  3 bugs  commit_order=[…]`
    - Fix committed: `BUG-003 (fix-acl) committed  (2 files, test added, phpunit ✓)`
    - Bundle reviewed: `fix-acl  3/3 APPROVE from 🧵  → kept, implementer +3`
@@ -199,7 +200,7 @@ Each voter receives:
 Prefer smaller, cheaper subagents for voting:
 
 - `agent_type: "explorer"`
-- model `gpt-5.4-mini`
+- model `$MODEL_VOTE` (default `gpt-5.4-mini`)
 
 ### Live progress during voting
 
@@ -299,8 +300,8 @@ The orchestrator owns integration:
 
 For each completed bundle, dispatch **one reviewer subagent** — not the planner or implementer of that bundle, and not a bug's original finder when avoidable:
 
-- `haiku`-tier model when the bundle's plan frontmatter says `test_strategy: tdd`
-- `sonnet`-tier (`gpt-5.4`) when `test_strategy: architectural`
+- `gpt-5.4-mini` when the bundle's plan frontmatter says `test_strategy: tdd`
+- `gpt-5.4` when `test_strategy: architectural`
 
 The reviewer gets the plan, the patches/diffs for every per-bug commit on the bundle branch, and the validation output. It returns one verdict per bug (`APPROVE` / `REJECT` with a one-sentence reason). The orchestrator writes `.temp/bounty/reviews/<bundle>.json`.
 
@@ -309,7 +310,7 @@ Process reviewers incrementally via `wait_agent`; the moment a bundle's review l
 Resolution per bug:
 
 - `APPROVE`: keep the commit; implementer gets `+1`
-- `REJECT`: revert that single commit on the bundle branch; the bug goes back to the queue for one isolated per-bug retry (opus/`gpt-5.4`), then abandoned if it rejects again
+- `REJECT`: revert that single commit on the bundle branch; the bug goes back to the queue for one isolated per-bug retry (`gpt-5.4`), then abandoned if it rejects again
 
 After review:
 

@@ -205,8 +205,12 @@ bounty/
 │   └── flow.svg
 ├── codex-skills/
 │   ├── bounty/
+│   │   ├── agents/
+│   │   │   └── openai.yaml
 │   │   └── SKILL.md
 │   └── bounty-cleanup/
+│       ├── agents/
+│       │   └── openai.yaml
 │       └── SKILL.md
 ├── plugins/bounty/
 │   ├── .codex-plugin/
@@ -215,8 +219,12 @@ bounty/
 │   │   └── bounty-small.svg
 │   └── skills/
 │       ├── bounty/
+│       │   ├── agents/
+│       │   │   └── openai.yaml
 │       │   └── SKILL.md
 │       └── bounty-cleanup/
+│           ├── agents/
+│           │   └── openai.yaml
 │           └── SKILL.md
 ├── commands/
 │   ├── bounty.md
