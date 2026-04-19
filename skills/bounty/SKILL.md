@@ -38,6 +38,23 @@ Write `.temp/bounty/config.json` with the resolved arguments.
 
 Write an empty `.temp/bounty/leaderboard.json` with zeroed scores for the chosen specialists. See `references/state-schema.md` for file schemas.
 
+## Live progress output
+
+The orchestrator must surface progress **as events happen**, not just at phase boundaries. The user is watching — silent phases feel broken.
+
+Rules that apply to every phase below:
+
+1. **Tail state directories while agents run.** Hunters, voters, and fixers all write files as their source of truth. Between dispatch and final `TaskList` wait, run short polling Bash calls (≈20–30s apart, max ~20 iterations per phase) that list new files and print a one-liner per file.
+2. **Print a one-liner per event as it lands.** Use compact, scannable formats:
+   - New claim: `🛡️ Security → BUG-003  high  sql-injection  app/Http/Orders.php:142`
+   - New vote: `BUG-003  ✓ VALID  from 🧵 Concurrency  (sanitizer bypassed upstream)`
+   - Claim resolved: `BUG-003 CONFIRMED (4 VALID / 1 FP / 2 abstain)  finder +1 → 🛡️ Security`
+   - Fix committed: `BUG-003 fixed by 🛡️ Security  (2 files, test added, phpunit ✓)`
+   - Fix review: `BUG-003  APPROVE from 🧵  APPROVE from ⚡  → kept, fixer +1`
+3. **Re-render the running leaderboard on every state change** (new confirmation, new FP, new fix-approval). Print the same table format as `references/scoring-rules.md`, prefixed with `— leaderboard @ <phase> —`.
+4. **Never batch.** If three claims land during one poll tick, print three lines — do not summarize as "3 new claims."
+5. Keep the poll loop bounded: exit as soon as `TaskList` shows all dispatched agents in that phase complete, or after the iteration cap (then fall through to the phase's final wait).
+
 ## Phase 1: Shared recon
 
 Spawn **1 recon agent** in an isolated worktree (`isolation: "worktree"`, `model: "sonnet"`, `run_in_background: false`). Its job: produce a shared briefing that every hunter receives as cached context.
@@ -74,11 +91,20 @@ Each prompt must include:
   - Scan their lens first, then broaden
   - For each claim, verify the evidence by reading the code — do not guess
   - Discard claims below the severity floor
-  - **Write each claim as a JSON file** to `.temp/bounty/claims/BUG-<agent>-<seq>.json` (see `references/state-schema.md`). Never emit claims only to stdout — the file is the source of truth.
+  - **Write each claim to its JSON file the moment it is verified**, not in a batch at the end — the orchestrator tails this directory for live output. Path: `.temp/bounty/claims/BUG-<agent>-<seq>.json` (see `references/state-schema.md`). Never emit claims only to stdout — the file is the source of truth.
   - Stop when they have 5 claims OR 10 minutes elapsed, whichever comes first
   - Return a final one-line summary: `<lens>: <n> claims submitted`
 
-Wait for all N agents. Read the claims directory.
+### Live tailing while hunters run
+
+Do not simply block on `TaskList`. Instead, alternate short poll cycles until all hunters complete:
+
+1. Track a set of claim filenames already printed.
+2. Every ~25s run a Bash call like `ls -t .temp/bounty/claims/*.json 2>/dev/null` and diff against the printed set.
+3. For each new file, read it and print the **new-claim one-liner** from the Live progress rules. Also print a compact running count: `claims so far: 🛡️ 3 · 🧵 2 · ⚡ 1 · … (total 6)`.
+4. Call `TaskList` at the end of each cycle; when every hunter is `completed`, break.
+
+Then read the claims directory in full and proceed.
 
 ### Deduplicate
 
@@ -95,9 +121,17 @@ For each surviving claim, the **other N−1 agents** vote. Dispatch all voters f
 Each voter prompt includes:
 - The claim JSON
 - The file excerpt cited as evidence (read it, include ±10 lines)
-- Instructions: return a single JSON line `{"verdict": "VALID"|"FALSE_POSITIVE"|"ABSTAIN", "reason": "<one sentence>"}` appended to `.temp/bounty/votes/<BUG-ID>.jsonl`
+- Instructions: **append the verdict line to `.temp/bounty/votes/<BUG-ID>.jsonl` immediately upon deciding** — do not hold it for a batch return. The orchestrator tails this file for live output. Format: `{"verdict": "VALID"|"FALSE_POSITIVE"|"ABSTAIN", "reason": "<one sentence>", "voter": "<lens>"}`
 
 Process claims in batches of 5 to keep parallelism bounded.
+
+### Live tailing during voting
+
+Between dispatching a batch and it finishing, alternate ~20s poll cycles:
+
+1. For each `<BUG-ID>.jsonl` in `.temp/bounty/votes/`, compare its current line count to the count printed last cycle. Print the **new-vote one-liner** for each newly appended line.
+2. When a claim's vote count reaches N−1 (all voters in), apply the resolution rules immediately and print the **claim-resolved one-liner** plus an updated leaderboard table (see Live progress output rules).
+3. Break when every claim in the batch is resolved, then proceed to the next batch.
 
 ### Resolution rules
 
@@ -146,12 +180,18 @@ Each fixer prompt includes:
 
 Dispatch fixers in batches of 3 in parallel (opus cost is non-trivial).
 
+### Live tailing during fixes
+
+Fixers write their report to `.temp/bounty/fixes/<BUG-ID>.json` on completion. While a batch is running, alternate ~30s poll cycles: list fix reports, diff against the printed set, and emit the **fix-committed one-liner** for each new report (including files-changed count, test-added flag, and validation pass/fail). Break when `TaskList` shows all fixers in the batch complete.
+
 ### Fix review
 
 For each completed fix, dispatch **2 reviewers in parallel** (`model: "sonnet"`), excluding the finder and fixer. Each returns `APPROVE` or `REJECT` with a one-sentence reason.
 
 - 2 approvals → fix is kept, fixer gets **+1**
 - 1+ rejections → fix returned to queue; a different agent may try once more, then abandon
+
+Print the **fix-review one-liner** as each reviewer pair resolves, and re-render the leaderboard after every approval or abandonment.
 
 ## Phase 5: Ship
 
