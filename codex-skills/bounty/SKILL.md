@@ -42,6 +42,9 @@ Parse the user request for these optional flags or settings:
 | `--model-fix <model>` | `gpt-5.4-mini` | Preferred model for bundle implementers |
 | `--max-bugs-per-pr N` | 10 | Phase-5 splits into an additional PR when a group would exceed this bug count |
 | `--max-lines-per-pr N` | 400 | Phase-5 splits into an additional PR when a group's added+removed line count would exceed this |
+| `--pr-review-rounds N` | 2 | Step 5e polls each opened PR for automated-review comments, validates them, fixes valid ones, and (when replies are on) replies with rationale to invalid ones, up to N rounds per PR |
+| `--pr-review-wait <secs>` | 300 | How long to wait after opening a PR before the first round of feedback polling (gives CI + bot reviewers time to post) |
+| `--pr-review-replies` / `--no-pr-review-replies` | ask | Whether Step 5e posts a rationale reply on each PR for suggestions marked `INVALID`. Explicit flag skips the Phase-0 verify; when neither is set, verify with the user at Phase 0 (default `on` after 30s timeout). Resolved choice is recorded in `config.json` as `pr_review_replies` |
 | `--fresh` | false | At Phase 0, proceed alongside any existing `.temp/bounty/<id>/` dirs without prompting (each run uses its own state dir) |
 | `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
@@ -112,7 +115,7 @@ State is per-run, under `.temp/bounty/<run_id>/`:
 
 ```bash
 STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
-mkdir -p "$STATE_DIR"/{claims,votes,fixes,plans,reviews}
+mkdir -p "$STATE_DIR"/{claims,votes,fixes,plans,reviews,pr-review}
 ln -snf "$RUN_ID" "$MAIN_REPO/.temp/bounty/latest"
 ```
 
@@ -121,6 +124,26 @@ Store the absolute `state_dir` in `$STATE_DIR/config.json`. Codex worker subagen
 Write `$STATE_DIR/config.json` using the schema from `../../skills/bounty/references/state-schema.md`, with the resolved arguments plus `"runtime": "codex"`, `run_id`, and `main_start`.
 
 **Seed `leaderboard.json` with every specialist in the `specialists` list, not just the ones we expect to find bugs.** A recent Claude-side run initialized only 5 specialists and silently dropped the other 3 when they submitted claims. Iterate the resolved specialist list; write a zeroed row for each one. Use temp-file plus rename for atomic writes.
+
+**Write `leaderboard.json` (and every subsequent update) as single-line minified JSON via shell, not through a Write-style tool.** In Claude Code, the `Write` tool renders a multi-line JSON preview that visually dominates the frame and buries the championship table the user is meant to see. Codex should match: `jq -cn ... > tmp && mv tmp leaderboard.json`. The JSON file is machine state; the ASCII table in 0e is the user-facing artifact. Keep the file-write quiet so the table can be read.
+
+**Resolve `pr_review_replies` before Phase 1.** Step 5e can post a consolidated rationale reply on each PR explaining why a suggestion was marked `INVALID`. Because this writes to a user-visible place, default to verifying — but only when the user didn't already express a preference on the command line:
+
+| Command-line input | Resolved `pr_review_replies` | Prompt? |
+|--------------------|------------------------------|---------|
+| `--pr-review-replies` | `true` | No |
+| `--no-pr-review-replies` | `false` | No |
+| `--no-fix` (no PRs will exist) | `false` | No |
+| neither flag, `--no-fix` absent | ask the user | Yes |
+
+Prompt:
+
+```
+🤖 Step 5e can reply on each PR with a rationale for any suggestion it marks INVALID.
+   Post these rationale replies?  (y/n)  — default y in 30s
+```
+
+On `y` / timeout: `pr_review_replies: true`. On `n`: `pr_review_replies: false`. Record the resolved value in `config.json` so `--resume` does not re-prompt. Announce the outcome once: `✓ PR rationale replies: on` or `… off`. Step 5e still records every INVALID verdict in `$STATE_DIR/pr-review/<pr-number>.json` regardless of the flag — only the GitHub-facing comment is gated.
 
 **Probe the voter-tier model** before the hunt: fire one throwaway call at `$MODEL_VOTE` and catch a rate-limit / usage-cap error. If it fires, warn the user:
 
@@ -131,6 +154,8 @@ Write `$STATE_DIR/config.json` using the schema from `../../skills/bounty/refere
 ### 0e. Render the starting championship table — REQUIRED OUTPUT
 
 **The single most-missed step in the entire skill.** Past runs have skipped straight to "dispatching recon…" and the user never sees a table until the final report (or never at all, if the run dies early). Do this now; it is not optional.
+
+**A `leaderboard.json` file-write preview is not this table.** If the last thing in the user's view is a JSON blob, the scoreboard has not been rendered yet. Emit the table below as assistant stdout text (outside any tool call) immediately after writing `leaderboard.json`, so the table — not the JSON preview — is the most recent thing on screen.
 
 Print this to stdout **and** write it to `$STATE_DIR/README.md` before any Phase-1 dispatch:
 
@@ -156,6 +181,49 @@ Include exactly the specialists this run configured — no phantom rows, no drop
 Re-render at every phase boundary (start of Phase 1, 2, 3, 4, 5, 6) with live numbers, prefixed `🏆 BOUNTY CHAMPIONSHIP — standings @ phase N (run <RUN_ID>)`. A long silent hunt phase is exactly when the user most needs to see the table, so the rule "re-render on scoring events" alone is not enough.
 
 If the orchestrator has not emitted this exact table within the first 10 seconds of the run, it has violated the skill. Stop and emit it.
+
+### 0f. Clawd the mascot (optional whimsy)
+
+The run is a competition — let it feel like one. On every leaderboard re-render, print a short Clawd frame **above** the table. The frame varies with the most recent event so successive renders subtly animate. Single-frame per render only — multi-frame redraws flicker in a tailed terminal.
+
+- New confirmation:
+  ```
+    /\___/\
+   ( ^   ^ )   🎯  nice catch!
+   (  =^=  )
+    ‾‾‾‾‾‾
+  ```
+- False positive:
+  ```
+    /\___/\
+   ( x   x )   😅  ope, false positive.
+   (  =^=  )
+    ‾‾‾‾‾‾
+  ```
+- Fix approved / PR landed:
+  ```
+    /\___/\    🏆
+   ( ^   ^ )── 🏆  fix landed!
+   (  =^=  )   🏆
+    ‾‾‾‾‾‾
+  ```
+- Lead change:
+  ```
+     ♛ ♛ ♛
+    /\___/\
+   ( ^   ^ )   👑  <specialist> takes the crown!
+   (  =^=  )
+    ‾‾‾‾‾‾
+  ```
+- Quiet phase tick (no scoring change):
+  ```
+    /\___/\
+   ( o   o )   🔎  still hunting…
+   (  =^=  )
+    ‾‾‾‾‾‾
+  ```
+
+Skip Clawd if memory records the user prefers terse output. The table is the contract; Clawd is garnish. When in doubt, render him.
 
 ## Branch isolation contract
 
@@ -235,7 +303,7 @@ Rules that apply to every phase below:
    - Plan written: `📋 plans/fix-acl.md written  3 bugs  commit_order=[…]`
    - Fix committed: `BUG-003 (fix-acl) committed  (2 files, test added, phpunit ✓)`
    - Bundle reviewed: `fix-acl  3/3 APPROVE from 🧵  → kept, implementer +3`
-3. Re-render the running leaderboard on every scoring change (new confirmation, false positive, or fix approval) **AND at the start of every phase** — even when nothing has scored yet. Use the exact table format from Phase 0e; prefix `🏆 BOUNTY CHAMPIONSHIP — standings @ phase N (run <RUN_ID>)`. Never substitute a text summary; the table is the contract.
+3. Re-render the running leaderboard on every scoring change (new confirmation, false positive, or fix approval) **AND at the start of every phase** — even when nothing has scored yet. Use the exact table format from Phase 0e; prefix `🏆 BOUNTY CHAMPIONSHIP — standings @ phase N (run <RUN_ID>)`. Never substitute a text summary; the table is the contract. Also never substitute a `leaderboard.json` file-write preview for the table — the JSON is machine state, the ASCII table is the scoreboard. Emit the table as assistant stdout text right after every `leaderboard.json` update. Render Clawd (0f) above the table; pick the frame matching the most recent event (confirmation, FP, fix-approved, lead-change, or the quiet-tick frame when re-render was triggered by a phase boundary).
 4. Never compress multiple new events into a single summary line. If three claims are accepted from one hunter result, print three claim lines.
 5. If no agent completes for roughly 20-30 seconds, emit a short heartbeat update that names the phase and the remaining agent count, then keep waiting.
 6. Refresh `$STATE_DIR/README.md` whenever the visible leaderboard changes so the on-disk dashboard matches what the user sees.
@@ -501,6 +569,63 @@ Open a separate GitHub issue per `critical` bug instead of committing. Link each
 
 If GitHub tooling is unavailable, stop after local commits and report the exact blocker — do not fall back to a single combined branch.
 
+### Step 5e: Automated PR review feedback loop
+
+Modeled on `/moo`'s `moo-pr-feedback-handler` from the Moogento repo. After every PR opens in Step 5c, CI + bot reviewers (GitHub Advanced Security, CodeRabbit, Copilot, Claude review bot, etc.) typically post within 5–15 min. Step 5e reads those comments, validates them, fixes the valid ones in-place on the PR branch, and — when `pr_review_replies` is `true` — replies with a rationale to any that are wrong. Loop up to `--pr-review-rounds` rounds per PR (default 2).
+
+Skip Step 5e entirely when `--no-fix` was passed (no PRs exist) or when Step 5c opened zero PRs.
+
+Dispatch one worker per PR in parallel — each PR has its own worktree on its `bounty/<run_id>/pr-*` branch and its own `$STATE_DIR/pr-review/<pr-number>.json` state file. Each worker's prompt includes `PR_NUMBER`, `PR_BRANCH`, worktree path, `STATE_DIR`, `MAX_ROUNDS = --pr-review-rounds`, `WAIT_SECONDS = --pr-review-wait`, `POST_REPLIES = config.pr_review_replies`, and the repo's validation commands (from `CLAUDE.md` / `AGENTS.md`, cached in `config.json`).
+
+Per-round loop (1…MAX_ROUNDS):
+
+1. **Wait for checks.** Poll `gh pr checks $PR_NUMBER` every 60s up to `WAIT_SECONDS`, breaking early when no check is `pending / in_progress / queued / running`. Record failed checks for the final report.
+
+2. **Read new comments.** Both issue-comments and review-comments; skip ids already in `processed_comment_ids` from prior rounds. If zero new actionable comments, exit the loop with `exit_reason: "no_new_feedback"`.
+
+3. **Evaluate each suggestion** by reading the referenced file and ±10 lines of context. Label `VALID`, `INVALID`, or `SKIP`. Never blind-apply. A technically-correct suggestion that conflicts with a documented ADR / comment / test is `INVALID` with a pointer.
+
+4. **Implement valid fixes in-place** on the PR branch. Keep fixes minimal. Run validation after every fix; if validation regresses, roll the fix back and record `{"verdict": "VALID", "applied": false, "reason": "validation regressed"}` — the suggestion still goes into the rejection reply (if replies are on).
+
+5. **Post rationale reply for INVALID** (one consolidated comment per round) **only when** `POST_REPLIES == true` and at least one `INVALID` was recorded this round. Body:
+
+   ```
+   ## Bounty automated-review response — round <N>
+
+   The following suggestions were evaluated by the bounty run and not applied:
+
+   - **<file>:<line>** — <what was suggested> — <why rejected>
+
+   These points have been reviewed and will not be addressed in this PR.
+   ```
+
+   Skip the reply entirely when `POST_REPLIES` is false or when every new comment was `VALID` / `SKIP`. Either way, the worker still records every INVALID verdict + rationale in `$STATE_DIR/pr-review/<pr-number>.json` so the final report can surface them.
+
+6. **Commit and push** fixes as a single combined commit per round. Follow the repo's commit rules (no `fix:` / `feat:` prefix, lowercase module, no AI attribution):
+
+   ```
+   <module>: improved code quality from automated review (round <N>)
+
+   Applied valid suggestions from the round-<N> automated PR review.
+
+   Changes:
+   - <specific fix 1>
+   - <specific fix 2>
+
+   PR #<pr-number>, bounty <run_id>
+   ```
+
+7. **Repeat** until `MAX_ROUNDS`. Stop early when a round produces zero new actionable comments or every new comment was `INVALID` / `SKIP`.
+
+Live stdout per round:
+
+```
+🤖 PR #1234 round 1: 7 new comments · VALID 4 · INVALID 2 · SKIP 1
+✍  PR #1234 round 1: 4 fixes pushed (commit a1b2c3d), rejection reply posted for 2
+```
+
+Branch isolation still applies: the worker only touches its own PR branch, never pushes elsewhere, never writes files outside its worktree or `$STATE_DIR`. Leak-sweep after every worker returns.
+
 ## Phase 6: Final report
 
 Render final standings to stdout and `$STATE_DIR/README.md`, including:
@@ -511,6 +636,7 @@ Render final standings to stdout and `$STATE_DIR/README.md`, including:
 - abandoned fixes and reasons
 - PR URL if created
 - critical issues opened
+- **automated-review outcomes** per PR (from `$STATE_DIR/pr-review/<pr-number>.json`): rounds run, fixes applied with commit SHAs, rejections with rationale, whether `pr_review_replies` was on or off
 - rough wall-clock and cost notes
 
 ## Notes

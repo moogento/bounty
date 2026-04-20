@@ -21,6 +21,8 @@ Directory layout:
     BUG-<id>.json       # per-bug fix report (one per bug inside a bundle)
   reviews/
     <bundle>.json       # per-bundle review verdicts (one APPROVE/REJECT per bug)
+  pr-review/
+    <pr-number>.json    # Step 5e — per-PR automated-review feedback rounds (processed ids, verdicts, fix commits, rejection replies)
   README.md             # live human-readable dashboard
 ```
 
@@ -223,6 +225,40 @@ Written by the bundle reviewer after Step 4d. One verdict per bug in the bundle.
   ]
 }
 ```
+
+## `pr-review/<pr-number>.json`
+
+Written by the Step 5e PR-feedback worker. One file per PR, one `rounds[]` entry per round. `exit_reason` is set once the worker stops looping.
+
+```json
+{
+  "pr_number": 1234,
+  "branch": "bounty/20260420-143000-smartcart/pr-1-acl-and-csrf",
+  "started_at": "2026-04-20T04:05:00Z",
+  "exit_reason": "no_new_feedback",
+  "rounds": [
+    {
+      "round": 1,
+      "wait_seconds": 300,
+      "checks_at_start": {"passed": 3, "failed": 0, "pending": 2},
+      "processed_comment_ids": [892341, 892352, 892399],
+      "evaluated": [
+        {"comment_id": 892341, "user": "coderabbitai[bot]", "path": "app/Http/Orders.php", "line": 142, "verdict": "VALID",   "reason": "Genuine SQL concat bypass; switched to prepared statement.", "applied": true},
+        {"comment_id": 892352, "user": "coderabbitai[bot]", "path": "app/Http/Cart.php",   "line":  63, "verdict": "INVALID", "reason": "Conflicts with ADR-017 live-pricing contract.",          "applied": false},
+        {"comment_id": 892399, "user": "github-actions[bot]", "path": null, "line": null, "verdict": "SKIP",    "reason": "Informational summary only.",                          "applied": false}
+      ],
+      "fix_commit_shas": ["a1b2c3d"],
+      "rejection_reply_comment_id": 892410,
+      "pushed": true,
+      "finished_at": "2026-04-20T04:12:00Z"
+    }
+  ]
+}
+```
+
+`exit_reason` ∈ {`no_new_feedback`, `all_invalid_or_skip`, `max_rounds_reached`, `aborted_failed_validation`}.
+
+`evaluated[].applied` captures whether a `VALID` suggestion was actually committed (a VALID fix whose validation regresses ends up `applied: false` with a rationale reply posted).
 
 ## `fixes/BUG-<id>.json`
 

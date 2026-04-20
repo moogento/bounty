@@ -20,7 +20,7 @@ The −3 penalty is intentionally harsh: it should hurt more to submit junk than
 
 ## Leaderboard format
 
-Render to stdout and to `.temp/bounty/README.md` after every resolution:
+Render to stdout and to `.temp/bounty/README.md` after every resolution. The stdout render is the user-visible scoreboard — always emit it as assistant text, not a `Write` tool preview of `leaderboard.json`. The JSON file is written separately via Bash + minified `jq -cn` so its tool-call UI doesn't bury the table.
 
 ```
 🏆 BOUNTY LEADERBOARD
