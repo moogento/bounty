@@ -11,7 +11,7 @@ Run a competitive multi-agent bug hunt adapted for Codex.
 
 This port keeps the same seven phases as the Claude Code plugin, but the orchestration changes in one important way:
 
-- The main Codex agent owns `.temp/bounty/` and performs every persistent write.
+- The main Codex agent owns `$STATE_DIR` (= `.temp/bounty/<run_id>/` for this run) and performs every persistent write.
 - Subagents return structured results in their final messages; the orchestrator validates those results and then serializes claims, votes, fix reports, and leaderboard updates into the shared state directory.
 - A request to "run bounty", "start a bounty hunt", or similar language counts as explicit permission to use parallel Codex subagents.
 
@@ -40,31 +40,87 @@ Parse the user request for these optional flags or settings:
 | `--model-vote <model>` | `gpt-5.4-mini` | Preferred model for voting; falls back to `--model-hunt` if it rate-limits |
 | `--model-plan <model>` | `gpt-5.4` | Preferred model for bundle planners |
 | `--model-fix <model>` | `gpt-5.4-mini` | Preferred model for bundle implementers |
+| `--max-bugs-per-pr N` | 10 | Phase-5 splits into an additional PR when a group would exceed this bug count |
+| `--max-lines-per-pr N` | 400 | Phase-5 splits into an additional PR when a group's added+removed line count would exceed this |
+| `--fresh` | false | At Phase 0, proceed alongside any existing `.temp/bounty/<id>/` dirs without prompting (each run uses its own state dir) |
+| `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
 If no scope is given, ask once whether to hunt the whole repo or a narrower module.
 
 ## Runtime Rules
 
-1. The orchestrator creates and updates every file under `.temp/bounty/`.
+1. The orchestrator creates and updates every file under `$STATE_DIR`. Each run has its own per-run state directory (`.temp/bounty/<run_id>/`) so concurrent bounty runs never collide.
 2. Subagents do not write shared state directly. They return structured text that the orchestrator validates first.
 3. Agents cannot vote on their own claims.
 4. Reviewers cannot review fixes they wrote or findings they originally submitted.
 5. Every claim needs a file path, line number, evidence snippet, trigger, impact, category, and severity. Missing any required field means the claim is rejected before voting.
 6. Keep the run resumable. If state already exists, reuse it unless the user explicitly asks for a fresh run.
+7. Every branch this run creates is `bounty/<run_id>/<bundle>` (or `bounty/<run_id>/pr-*`). Never commit to `main` or the user's starting branch. The orchestrator enforces this via the Branch isolation contract and runs a leak sweep after every worker phase.
+8. `bundles.json` must only reference `bug_id`s that exist in `$STATE_DIR/claims/`. Any desync aborts Phase 4 with a clear recovery message.
+9. **Never fall back to the main-repo checkout when a worktree worker is blocked.** A blocked worker yields a `status: "blocked"` fix report, not a shortcut that writes to main. See the "fall back to main" anti-pattern in the Branch isolation contract.
 
 ## Phase 0: Initialize state
 
-Create the state directory:
+Phase 0 is five gates — run them in order. Past runs skipped gates and produced state pollution, branch collisions, and commits on the wrong branch.
+
+### 0a. Generate the run id
 
 ```bash
-mkdir -p .temp/bounty/{claims,votes,fixes,plans,reviews}
+SCOPE_SLUG=$(echo "${SCOPE:-repo}" | tr '/' '-' | tr -cd '[:alnum:]-' | sed 's/^-*//;s/-*$//' | cut -c1-24)
+RUN_ID="$(date -u +%Y%m%d-%H%M%S)-${SCOPE_SLUG}"
 ```
 
-**Resolve the absolute state directory path** and store it as `state_dir` in `.temp/bounty/config.json`. Codex worker subagents can run in sandboxed directories — pass `STATE_DIR=<absolute>` in every dispatched prompt so outputs are serialized back to the main repo's state dir, never into a sandbox.
+Record `run_id` in `config.json`. Every branch MUST be named `bounty/<run_id>/<bundle>` (see Branch isolation contract). Two concurrent bounty runs in the same repo scope to different run ids and therefore different branches.
 
-Write `.temp/bounty/config.json` using the schema from `../../skills/bounty/references/state-schema.md`, with the resolved arguments plus `"runtime": "codex"`.
+### 0b. Scan for existing runs
 
-Write `.temp/bounty/leaderboard.json` with zeroed scores for the chosen specialists. Use temp-file plus rename for atomic writes.
+Each run's state lives under its own per-run directory: `.temp/bounty/<run_id>/`. Concurrent bounty runs in the same repo are supported — they never share a state dir.
+
+Scan for any in-progress runs (`.temp/bounty/<id>/config.json` with `last_completed_phase < 6`):
+
+| Condition | Action |
+|-----------|--------|
+| `--resume <id>` given | Load that run's config, adopt its `run_id`, continue from the first incomplete phase |
+| `--resume` with no id, exactly one in-progress | Resume that one |
+| `--fresh` given | Leave existing runs alone; create this run's own `.temp/bounty/<run_id>/` |
+| No flag, an in-progress run overlaps this run's `--scope` | Surface it (`<id> · last-completed=<phase> · scope=<path>`). Ask: `resume-<id> / proceed-alongside / abort`. Default `proceed-alongside` on 30-second timeout |
+| Nothing in-progress | Proceed |
+
+"Overlap" means one scope is a prefix of the other. Non-overlapping scopes run alongside each other silently.
+
+Never write into another run's state directory. The per-run layout makes this physically impossible as long as every write goes through `$STATE_DIR`.
+
+### 0c. Working-tree and branch gate
+
+```bash
+MAIN_REPO="$(git rev-parse --show-toplevel)"
+MAIN_START_BRANCH="$(git -C "$MAIN_REPO" branch --show-current)"
+MAIN_START_HEAD="$(git -C "$MAIN_REPO" rev-parse HEAD)"
+MAIN_START_DIRTY="$(git -C "$MAIN_REPO" status --porcelain | grep -vE '^\?\? \.temp/bounty' || true)"
+```
+
+Record all three in `config.json` under `main_start`. Block and prompt when any of the following is true:
+
+1. `MAIN_START_BRANCH` is not the repo's default branch — commits from this run must land on fresh `bounty/<run_id>/*` branches cut from `origin/main`, not on top of the user's work.
+2. `MAIN_START_DIRTY` is non-empty and any dirty path falls under `--scope` — this is the overlap that has caused past runs to stop mid-phase.
+
+Ask: `stash-and-proceed / commit-first / proceed-anyway / abort`. On `stash-and-proceed`, `git stash push --include-untracked -m "bounty-<run_id>: pre-run stash"` and record the stash ref so `/bounty-cleanup` can surface it later.
+
+### 0d. Initialize state directory
+
+State is per-run, under `.temp/bounty/<run_id>/`:
+
+```bash
+STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
+mkdir -p "$STATE_DIR"/{claims,votes,fixes,plans,reviews}
+ln -snf "$RUN_ID" "$MAIN_REPO/.temp/bounty/latest"
+```
+
+Store the absolute `state_dir` in `$STATE_DIR/config.json`. Codex worker subagents can run in sandboxed directories — pass `STATE_DIR=<absolute>` and `RUN_ID=<run_id>` in every dispatched prompt so outputs are serialized back to the main repo's state dir, never into a sandbox, and never into a *different* run's state dir if another bounty is active.
+
+Write `$STATE_DIR/config.json` using the schema from `../../skills/bounty/references/state-schema.md`, with the resolved arguments plus `"runtime": "codex"`, `run_id`, and `main_start`.
+
+**Seed `leaderboard.json` with every specialist in the `specialists` list, not just the ones we expect to find bugs.** A recent Claude-side run initialized only 5 specialists and silently dropped the other 3 when they submitted claims. Iterate the resolved specialist list; write a zeroed row for each one. Use temp-file plus rename for atomic writes.
 
 **Probe the voter-tier model** before the hunt: fire one throwaway call at `$MODEL_VOTE` and catch a rate-limit / usage-cap error. If it fires, warn the user:
 
@@ -72,14 +128,99 @@ Write `.temp/bounty/leaderboard.json` with zeroed scores for the chosen speciali
 ⚠ voter model returned a rate-limit on probe; Phase 3 will fall back to the hunt-tier model for voting.
 ```
 
+### 0e. Render the starting championship table — REQUIRED OUTPUT
+
+**The single most-missed step in the entire skill.** Past runs have skipped straight to "dispatching recon…" and the user never sees a table until the final report (or never at all, if the run dies early). Do this now; it is not optional.
+
+Print this to stdout **and** write it to `$STATE_DIR/README.md` before any Phase-1 dispatch:
+
+```
+🏆 BOUNTY CHAMPIONSHIP — standings @ phase 0 (run <RUN_ID>)
+┌─────┬──────────────────┬───────┬──────┬─────┬───────┬───────┐
+│ #   │ Specialist       │ Found │ Conf │ FPs │ Fixes │ SCORE │
+├─────┼──────────────────┼───────┼──────┼─────┼───────┼───────┤
+│  -  │ 🛡️  Security     │     0 │    0 │   0 │     0 │     0 │
+│  -  │ 🧵 Concurrency   │     0 │    0 │   0 │     0 │     0 │
+│  -  │ ⚡ Performance   │     0 │    0 │   0 │     0 │     0 │
+│  -  │ ∅ NullSafety     │     0 │    0 │   0 │     0 │     0 │
+│  -  │ ⚠ ErrorHandling  │     0 │    0 │   0 │     0 │     0 │
+│  -  │ 🔐 AuthZ         │     0 │    0 │   0 │     0 │     0 │
+│  -  │ 🧮 DataIntegrity │     0 │    0 │   0 │     0 │     0 │
+│  -  │ 💧 Resources     │     0 │    0 │   0 │     0 │     0 │
+└─────┴──────────────────┴───────┴──────┴─────┴───────┴───────┘
+ Confirmed: 0 │ FPs: 0 │ Inconclusive: 0 │ Fixed: 0 │ Pending: 0
+```
+
+Include exactly the specialists this run configured — no phantom rows, no dropped ones.
+
+Re-render at every phase boundary (start of Phase 1, 2, 3, 4, 5, 6) with live numbers, prefixed `🏆 BOUNTY CHAMPIONSHIP — standings @ phase N (run <RUN_ID>)`. A long silent hunt phase is exactly when the user most needs to see the table, so the rule "re-render on scoring events" alone is not enough.
+
+If the orchestrator has not emitted this exact table within the first 10 seconds of the run, it has violated the skill. Stop and emit it.
+
+## Branch isolation contract
+
+All commits produced by a bounty run land on branches named `bounty/<run_id>/<bundle>` cut from `origin/main` inside isolated worktrees. **Never** on the user's current branch. **Never** on `main`.
+
+### The "fall back to main" anti-pattern — forbidden
+
+A prior run logged: *"worktree-isolated implementer agents got blocked on git/php -l permission prompts, so I completed the last fixes directly on the main-repo checkout."* **This must never happen again.** The orchestrator does not work around worktree permission prompts by moving work to the main repo. If a worktree worker is blocked on a tool prompt:
+
+1. **Retry once** with the specific tool explicitly permitted in the dispatch (e.g. `Bash(php:*)`, `Bash(git:*)`). If it still blocks, proceed to step 2.
+2. **Mark the bundle blocked, not complete.** Write `$STATE_DIR/fixes/<BUG-ID>.json` with `{"status": "blocked", "reason": "worktree tool prompt: <tool>"}` for the remaining bugs. Phase 5 skips blocked bundles.
+3. **Surface to the user** with one line per blocked bundle: `⛔ fix-<bundle> blocked by worktree tool prompt for <tool>`.
+
+Do **not** `cd` into the main repo, use the orchestrator's own permissions to apply the fix "just this once," or copy partial worker output to the main repo to finish it. Blocked fixes are a clean failure; leaks onto main are a catastrophic one.
+
+### Post-implementer commit verification
+
+After each implementer returns, before accepting its fix report:
+
+```bash
+for sha in $(jq -r '.commit_sha' "$STATE_DIR"/fixes/BUG-*.json); do
+    ON_BUNDLE=$(git branch --contains "$sha" 2>/dev/null | grep -c "bounty/<run_id>/<bundle>" || echo 0)
+    ON_MAIN=$(git branch --contains "$sha" 2>/dev/null | grep -c "^\s*main$" || echo 0)
+    [ "$ON_BUNDLE" -eq 1 ] && [ "$ON_MAIN" -eq 0 ] || echo "LEAK $sha"
+done
+```
+
+Any commit that lands on `main` (or `MAIN_START_BRANCH`) is a leak. Stop the run, recover the commit onto `bounty-recovered-<run_id>-<bundle>`, and restore main to `MAIN_START_HEAD`. Report.
+
+### Worker prompt block
+
+Every planner, implementer, and reviewer prompt must include this verbatim:
+
+```
+You are in an isolated worktree on branch bounty/<RUN_ID>/<BUNDLE>.
+- Do NOT `git switch`, `git checkout`, or `git branch -D` to any other branch.
+- Do NOT push, do NOT open PRs. The orchestrator handles all network operations.
+- Do NOT write files outside this worktree. The only path outside the worktree you may write is $STATE_DIR, and only the specific filenames named in your prompt.
+- If you finish with uncommitted changes, commit them on this branch before returning.
+```
+
+### Pre-dispatch guard
+
+Before dispatching a wave of workers, verify:
+
+1. Each worktree's branch is `bounty/<run_id>/<bundle>`.
+2. Each worktree's base is `origin/main` (`git merge-base --is-ancestor origin/main <branch>`).
+3. `MAIN_START_HEAD` still matches the main repo's current HEAD, and `MAIN_START_BRANCH` still matches the main repo's current branch.
+
+Any mismatch aborts the wave and triggers the leak sweep.
+
+### Post-phase leak sweep
+
+After each phase that dispatches workers (planners, implementers, reviewers, PR-builders), re-run the 0c checks. If main-repo HEAD moved: STOP, surface to the user, do not auto-revert. If new files appeared under `CUR_DIRTY` that match bundle target files: move them to a `bounty-leak-<run_id>` branch (same pattern as moo-cleanup's WIP branch handling). Log a loud warning and continue — the user sees the leak branch in `/bounty-cleanup`.
+
+Emit one leak-sweep one-liner per phase: `🧹 leak sweep @ <phase>: main unchanged, 0 leaks`.
+
 ## Live progress output
 
 The orchestrator must surface progress as events happen, not just at phase boundaries. Silent waits feel broken.
 
-Because Codex subagents do not stream writes into the shared `.temp/bounty/` directory while they are still running, the live boundary is different from Claude Code:
+Because Codex subagents do not stream writes into the shared `$STATE_DIR` while they are still running, the live boundary is different from Claude Code:
 
 - Treat each completed subagent result as an event boundary.
-- Serialize accepted claims, votes, and fix reports into `.temp/bounty/` immediately when that subagent finishes.
+- Serialize accepted claims, votes, and fix reports into `$STATE_DIR` immediately when that subagent finishes.
 - Print the event line immediately after validation and persistence. Do not wait for the rest of the phase to finish.
 
 Rules that apply to every phase below:
@@ -94,10 +235,10 @@ Rules that apply to every phase below:
    - Plan written: `📋 plans/fix-acl.md written  3 bugs  commit_order=[…]`
    - Fix committed: `BUG-003 (fix-acl) committed  (2 files, test added, phpunit ✓)`
    - Bundle reviewed: `fix-acl  3/3 APPROVE from 🧵  → kept, implementer +3`
-3. Re-render the running leaderboard on every scoring change: new confirmation, false positive, or fix approval. Prefix it with `— leaderboard @ <phase> —`.
+3. Re-render the running leaderboard on every scoring change (new confirmation, false positive, or fix approval) **AND at the start of every phase** — even when nothing has scored yet. Use the exact table format from Phase 0e; prefix `🏆 BOUNTY CHAMPIONSHIP — standings @ phase N (run <RUN_ID>)`. Never substitute a text summary; the table is the contract.
 4. Never compress multiple new events into a single summary line. If three claims are accepted from one hunter result, print three claim lines.
 5. If no agent completes for roughly 20-30 seconds, emit a short heartbeat update that names the phase and the remaining agent count, then keep waiting.
-6. Refresh `.temp/bounty/README.md` whenever the visible leaderboard changes so the on-disk dashboard matches what the user sees.
+6. Refresh `$STATE_DIR/README.md` whenever the visible leaderboard changes so the on-disk dashboard matches what the user sees.
 
 ## Phase 1: Shared recon
 
@@ -167,7 +308,7 @@ The orchestrator then:
 
 - validates every returned claim
 - computes the fingerprint `sha256(normalized_file + ":" + category + ":" + (line // 10))`
-- writes accepted claims to `.temp/bounty/claims/BUG-<lens>-<seed>-<seq>.json`
+- writes accepted claims to `$STATE_DIR/claims/BUG-<lens>-<seed>-<seq>.json`
 - merges duplicates by fingerprint and records later submissions in `co_discovered_by`
 - increments `collision_count` on the surviving claim each time a duplicate lands; emits a `collided` one-liner live
 - runs a **secondary semantic-dedup pass** over surviving claims: buckets by `(normalize(file), line // 10)` ignoring category, and for any bucket with ≥2 claims from different specialties, merges them (keep highest-severity as survivor, append others' finders to `co_discovered_by`, increment `collision_count`, record merged categories). Emits a semantic-merge one-liner, e.g. `🔗 semantic merge: BUG-authz-1-001 + BUG-security-1-004 → surviving BUG-security-1-004`
@@ -210,11 +351,11 @@ Instead:
 
 1. Track outstanding voter agent ids for the active batch.
 2. Use `wait_agent` with a short timeout and process each completed voter as soon as it returns.
-3. Append that vote immediately to `.temp/bounty/votes/<BUG-ID>.jsonl` and print the new-vote one-liner.
+3. Append that vote immediately to `$STATE_DIR/votes/<BUG-ID>.jsonl` and print the new-vote one-liner.
 4. As soon as all votes for a given claim are present, resolve that claim immediately, update the leaderboard, print the claim-resolved one-liner, and re-render the leaderboard table.
 5. Continue until the batch has no unresolved claims left, then move to the next batch.
 
-The orchestrator appends every vote to `.temp/bounty/votes/<BUG-ID>.jsonl`, tallies the result, and updates `.temp/bounty/leaderboard.json` using the thresholds from `../../skills/bounty/references/scoring-rules.md`.
+The orchestrator appends every vote to `$STATE_DIR/votes/<BUG-ID>.jsonl`, tallies the result, and updates `$STATE_DIR/leaderboard.json` using the thresholds from `../../skills/bounty/references/scoring-rules.md`.
 
 Do not wait for the end of the batch to update the visible standings. The leaderboard update happens claim-by-claim.
 
@@ -235,12 +376,14 @@ Severity policy:
 
 ### Step 4a: Bundle confirmed bugs
 
-Cluster fixable bugs and write `.temp/bounty/bundles.json`. Default heuristic:
+Cluster fixable bugs and write `$STATE_DIR/bundles.json`. Default heuristic:
 
 1. One bundle per lens with ≥2 confirmed bugs.
 2. Lone-bug lenses merge into a `misc` bundle alongside adjacent lenses.
 3. Cap at `--max-bundles` (default 6); merge smallest first when exceeded.
 4. Each bundle has a kebab-slug name (e.g. `fix-acl`, `fix-fail-open`, `fix-concurrency`, `fix-nullsafety-misc`).
+
+**Integrity check before proceeding.** After writing `bundles.json`, verify every `bug_id` in every bundle exists as a file under `$STATE_DIR/claims/`. If any referenced id is missing, the state is polluted (most often from a mid-run restart with stale `bundles.json` from a prior run). Abort Phase 4 with a clear message naming the missing ids and recommending `/bounty --fresh` or `/bounty-cleanup`.
 
 ### Step 4b: Plan
 
@@ -269,7 +412,7 @@ commit_order: [BUG-authz-1-001, BUG-authz-1-002]
 
 Planners **must not produce code edits**. The orchestrator validates that the returned plan has no patch/diff content; if it does, the plan is rejected and that bundle falls back to per-bug fixing.
 
-The orchestrator writes the plan to `.temp/bounty/plans/<bundle>.md` and prints a plan-written one-liner.
+The orchestrator writes the plan to `$STATE_DIR/plans/<bundle>.md` and prints a plan-written one-liner.
 
 Process planners incrementally via `wait_agent` so each plan becomes available as soon as it's ready.
 
@@ -287,13 +430,13 @@ Each implementer must walk `commit_order` one bug at a time:
 - produce a minimal patch or a precise edit plan per bug; one commit per bug, never squashed
 - commit message follows the repo `<module>: <benefit>` format; reference the BUG-ID in the body
 - if a bug cannot pass validation, mark it `status: "skipped"` with a reason and continue the bundle
-- return a per-bug report the orchestrator serializes to `.temp/bounty/fixes/<BUG-ID>.json`
+- return a per-bug report the orchestrator serializes to `$STATE_DIR/fixes/<BUG-ID>.json` (the only state path any worker is allowed to imply)
 
 The orchestrator owns integration:
 
-- apply the returned patch/edits in the bundle's worktree on branch `bounty/<bundle>`
+- apply the returned patch/edits in the bundle's worktree on branch `bounty/<run_id>/<bundle>`
 - run project validation after each applied bug
-- write `.temp/bounty/fixes/<BUG-ID>.json` and print the fix-committed one-liner
+- write `$STATE_DIR/fixes/<BUG-ID>.json` with the committed status and print the fix-committed one-liner
 - commit on the bundle branch only when the per-bug validation passes
 
 ## Phase 5: Bundle review and ship
@@ -303,7 +446,7 @@ For each completed bundle, dispatch **one reviewer subagent** — not the planne
 - `gpt-5.4-mini` when the bundle's plan frontmatter says `test_strategy: tdd`
 - `gpt-5.4` when `test_strategy: architectural`
 
-The reviewer gets the plan, the patches/diffs for every per-bug commit on the bundle branch, and the validation output. It returns one verdict per bug (`APPROVE` / `REJECT` with a one-sentence reason). The orchestrator writes `.temp/bounty/reviews/<bundle>.json`.
+The reviewer gets the plan, the patches/diffs for every per-bug commit on the bundle branch, and the validation output. It returns one verdict per bug (`APPROVE` / `REJECT` with a one-sentence reason). The orchestrator writes `$STATE_DIR/reviews/<bundle>.json`.
 
 Process reviewers incrementally via `wait_agent`; the moment a bundle's review lands, resolve it and re-render the leaderboard.
 
@@ -312,23 +455,55 @@ Resolution per bug:
 - `APPROVE`: keep the commit; implementer gets `+1`
 - `REJECT`: revert that single commit on the bundle branch; the bug goes back to the queue for one isolated per-bug retry (`gpt-5.4`), then abandoned if it rejects again
 
-After review:
+After review, ship approved commits across **multiple PRs** — never one mega-PR. A single PR with 30+ bugs and 1,500+ changed lines is unreviewable.
 
-- create an aggregate branch `bounty/run-<YYYYMMDD-HHMM>`
-- merge each bundle branch that retained at least one commit (`--no-ff --no-squash`) — per-bug commits are the audit trail, never squashed
-- run aggregate validation
-- if aggregate validation fails, bisect and drop the offending commit before creating the PR
+### Ship limits
 
-Use `gh` or the GitHub connector when available to create:
+| Threshold | Default | Override |
+|-----------|---------|----------|
+| Max bugs per PR | 10 | `--max-bugs-per-pr` |
+| Max added+removed lines per PR | 400 | `--max-lines-per-pr` |
 
-- one PR for the approved non-critical fixes
-- separate issues for critical bugs
+Either threshold triggers a split. Exception: a single commit that alone exceeds `--max-lines-per-pr` gets its own PR marked `<module>: large fix — <theme>` so reviewers know what they're looking at.
 
-If GitHub tooling is unavailable, stop after local commits and report the exact blocker.
+### Step 5a: Group approved commits into PR batches
+
+Build `$STATE_DIR/pr-groups.json`:
+
+1. Start with the approved per-bug commits across bundle branches, preserving each bundle's `commit_order`.
+2. Group greedily by bundle theme first, then by severity.
+3. Measure `bug_count` and `est_lines = Σ (additions + deletions)` per commit (`git log --numstat <bundle-branch>..origin/main`).
+4. When adding the next commit would exceed either threshold, close the group and open the next. Keep a bundle's commits together when they fit.
+5. Name each group `bounty/<run_id>/pr-<N>-<slug>`.
+
+Print a one-liner per group so the user sees the plan before any branch is pushed.
+
+### Step 5b: Build each aggregate branch
+
+For each group: create `<slug>` off `origin/main`, cherry-pick the approved per-bug commits from their bundle branches preserving order, run aggregate validation. If validation fails, bisect, drop the offending commit, and record the drop in `pr-groups.json`. Never squash — the individual commits are the audit trail.
+
+Run a leak sweep (see Branch isolation contract) after all aggregates are built.
+
+### Step 5c: Push and open PRs
+
+Use `gh` or the GitHub connector to push each aggregate branch and open its PR. Title: `<module>: batch N/M — <theme>`. Body uses the template from `../../skills/bounty/references/scoring-rules.md` and cross-links the siblings:
+
+```
+> Part N of M from bounty run <run_id>.
+> Siblings: #<pr-1>, #<pr-2>, #<pr-3>.
+```
+
+Record each PR url in `$STATE_DIR/pr-groups.json` and `$STATE_DIR/README.md`.
+
+### Step 5d: Critical issues
+
+Open a separate GitHub issue per `critical` bug instead of committing. Link each issue from the final report.
+
+If GitHub tooling is unavailable, stop after local commits and report the exact blocker — do not fall back to a single combined branch.
 
 ## Phase 6: Final report
 
-Render final standings to stdout and `.temp/bounty/README.md`, including:
+Render final standings to stdout and `$STATE_DIR/README.md`, including:
 
 - confirmed bugs
 - false positives
