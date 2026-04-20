@@ -10,7 +10,7 @@ For fixing a *known* bug, use [`zap`](https://github.com/obra/zap) - `bounty` is
 
 ![bounty phase flow](assets/flow.svg)
 
-**7 phases, fully autonomous:**
+**8 phases, fully autonomous:**
 
 | Phase | What happens | Agents | Model |
 |-------|--------------|--------|-------|
@@ -18,9 +18,10 @@ For fixing a *known* bug, use [`zap`](https://github.com/obra/zap) - `bounty` is
 | **P1 Recon** | A scout surveys scope, churn, and test gaps - the map everyone sails from | 1 | Sonnet |
 | **P2 Hunt** | 8 specialists fan out in parallel, each writing claims to JSON | 8 | Sonnet |
 | **P3 Vote** | For each claim, the other 7 call VALID / FALSE_POSITIVE / ABSTAIN | N−1 per claim | Haiku |
+| **P3.5 PoC** | High/critical confirmed claims get a proof-of-concept; fails reproduce → demoted to FP | 1 per high+ claim | Sonnet |
 | **P4 Queue** | Confirmed finds queued, severity-policed (criticals → GitHub issue, rest → auto-fix) | - | - |
-| **P5 Fix** | Top 3 fixes implemented in parallel; 2 reviewers must approve each | up to 3 | Opus |
-| **P6 Ship** | Approved fixes cherry-picked onto one branch → PR via `gh` | - | - |
+| **P5 Fix** | Top 3 fixes implemented in parallel; 2 blind reviewers must approve each | up to 3 | Opus |
+| **P6 Ship** | Approved fixes cherry-picked onto one branch, scanned for secrets, → PR via `gh` | - | - |
 
 Every agent runs in its own git worktree. Claims, votes, and fixes are all JSON on disk - the run is resumable and the leaderboard is real.
 
@@ -39,6 +40,8 @@ Options:
 | `--severity <floor>` | Throw back anything below this (default: `medium`) |
 | `--max-claims N` | Hold size - cap on total claims (default: 40) |
 | `--no-fix` | Report-only run. Scout, don't skirmish. |
+| `--poc <mode>` | P3.5 PoC gate: `auto` = high/critical only (default), `always`, or `off`. A PoC that won't reproduce demotes the claim to FP. |
+| `--no-secrets-scan` | Disable the Step 5b.5 diff-level secrets scan. Default: on — a hit blocks that PR only. |
 | `--model-hunt <tier>` | Override hunter model (default: `sonnet`) |
 | `--model-fix <tier>` | Override fixer model (default: `opus`) |
 
@@ -125,21 +128,21 @@ At the end of a run, `bounty` prints the leaderboard to stdout and mirrors it to
 ```
 🏆 BOUNTY LEADERBOARD  -  BlackPearl
 ─────────────────────────────────────────────────────────────────
-  #    Specialist          Found  Conf  FPs  Fixes   Score
+  #    Specialist          Found  Conf  PoC  FPs  Fixes   Score
 ─────────────────────────────────────────────────────────────────
- 🥇    Concurrency            4     4    0     2      +6
- 🥈    Security               6     5    1     1      +3
- 🥉    Performance            3     3    0     0      +3
-  4    DataIntegrity          2     2    0     0      +2
-  5    NullSafety             3     2    0     0      +2
-  6    ErrorHandling          2     1    0     0      +1
-  7    Resources              1     0    0     0       0
-  8    AuthZ                  4     1    2     0      -5  💀
+ 🥇    Concurrency            4     4    1    0     2      +7
+ 🥈    Security               6     5    2    1     1      +5
+ 🥉    Performance            3     3    0    0     0      +3
+  4    DataIntegrity          2     2    0    0     0      +2
+  5    NullSafety             3     2    0    0     0      +2
+  6    ErrorHandling          2     1    0    0     0      +1
+  7    Resources              1     0    0    0     0       0
+  8    AuthZ                  4     1    0    2     0      -5  💀
 ─────────────────────────────────────────────────────────────────
- Confirmed 18  ·  FPs 3  ·  Inconclusive 4  ·  Fixed 3  ·  Critical 1
+ Confirmed 18  ·  PoC ✓ 3  ·  FPs 3  ·  Inconclusive 4  ·  Fixed 3  ·  Critical 1
 ```
 
-Reading left to right: Concurrency found 4 bugs, all confirmed, fixed 2 of them, and took the crown. Security was prolific but one of its claims got voted down by the majority - hence the -3 penalty dragging its total. AuthZ had a rough day: 4 claims, only 1 confirmed, two called bogus, -5 and a skull. That is the accountant doing their job.
+Reading left to right: Concurrency found 4 bugs, all confirmed, one reproduced by the PoC phase for a bonus point, fixed 2 of them, and took the crown. Security was prolific — 5 confirmed, two with reproducing PoCs — but one of its claims got voted down by the majority, so the -3 still dragged. AuthZ had a rough day: 4 claims, only 1 confirmed, two called bogus, -5 and a skull. That is the accountant doing their job.
 
 The numbers aren't vanity. Every row is derived from JSON files on disk (`.temp/bounty/leaderboard.json`) so you can audit every claim, every vote, and every fix after the fact.
 
@@ -166,6 +169,7 @@ A default run (8 agents, 40-claim cap, fixing on):
 | Recon | 1 | Sonnet | small |
 | Hunt | 8 parallel | Sonnet | medium |
 | Vote | up to 280 calls | Haiku | small (cheap per call) |
+| PoC | up to ~15 (high/critical only) | Sonnet | small-medium |
 | Fix | up to 10 | Opus | **largest** |
 | Review | up to 20 | Sonnet | medium |
 
@@ -234,6 +238,7 @@ bounty/
 │   └── references/
 │       ├── agent-specialties.md
 │       ├── scoring-rules.md
+│       ├── secret-patterns.txt
 │       └── state-schema.md
 └── README.md
 ```
