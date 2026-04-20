@@ -594,7 +594,7 @@ Each implementer must walk `commit_order` one bug at a time:
 
 - when `test_strategy: tdd`, write the failing test first, then the fix
 - produce a minimal patch or a precise edit plan per bug; one commit per bug, never squashed
-- commit message follows the repo `<module>: <benefit>` format; reference the BUG-ID in the body
+- commit message follows the repo `<module>: <benefit>` format and the three hard title rules in `../../skills/bounty/references/scoring-rules.md#commit-message-rules`: (1) no "bounty" or tool branding, (2) no PR number (not in the commit title — PR numbers belong in the PR body), (3) positive framing — no `fix`, `bug`, `error`, `issue`, `broken`, etc. in the title. Reference the BUG-ID in the body, never in the title.
 - if a bug cannot pass validation, mark it `status: "skipped"` with a reason and continue the bundle
 - return a per-bug report the orchestrator serializes to `$STATE_DIR/fixes/<BUG-ID>.json` (the only state path any worker is allowed to imply)
 
@@ -738,7 +738,7 @@ Per-round loop (1…MAX_ROUNDS):
 
    Skip the reply entirely when `POST_REPLIES` is false or when every new comment was `VALID` / `SKIP`. Either way, the worker still records every INVALID verdict + rationale in `$STATE_DIR/pr-review/<pr-number>.json` so the final report can surface them.
 
-6. **Commit and push** fixes as a single combined commit per round. Follow the repo's commit rules (no `fix:` / `feat:` prefix, lowercase module, no AI attribution):
+6. **Commit and push** fixes as a single combined commit per round. Follow the three hard title rules in `../../skills/bounty/references/scoring-rules.md#commit-message-rules`: no "bounty" / tool branding, no PR number (not even a `(#1234)` suffix — the platform adds its own metadata), positive framing only. Lowercase module, no AI attribution, no `fix:` / `feat:` prefix:
 
    ```
    <module>: improved code quality from automated review (round <N>)

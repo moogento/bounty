@@ -12,7 +12,7 @@
     {
       "name": "bounty",
       "description": "Discover bugs via competitive multi-agent scoring: specialist lenses hunt, vote on each other's claims, fix survivors, and earn points. False positives penalized.",
-      "version": "1.3.0",
+      "version": "1.3.1",
       "source": "./"
     }
   ]
