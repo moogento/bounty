@@ -63,7 +63,7 @@ If no scope is given, ask once whether to hunt the whole repo or a narrower modu
 4. Reviewers cannot review fixes they wrote or findings they originally submitted.
 5. Every claim needs a file path, line number, evidence snippet, trigger, impact, category, and severity. Missing any required field means the claim is rejected before voting.
 6. Keep the run resumable. If state already exists, reuse it unless the user explicitly asks for a fresh run.
-7. Every branch this run creates is `bounty/<run_id>/<bundle>` (or `bounty/<run_id>/pr-*`). Never commit to `main` or the user's starting branch. The orchestrator enforces this via the Branch isolation contract and runs a leak sweep after every worker phase.
+7. Every branch this run creates is `bounty/<run_id>/<bundle>` (or `bounty/<run_id>/pr-*`). Every such branch is created **exclusively** via `git worktree add -b` — no branch without a worktree, ever. Never commit to `main` or the user's starting branch. The orchestrator enforces this via the Branch isolation contract and runs a leak sweep (main unchanged + no dangling branches + no orphan worktrees) after every worker phase.
 8. `bundles.json` must only reference `bug_id`s that exist in `$STATE_DIR/claims/`. Any desync aborts Phase 4 with a clear recovery message.
 9. **Never fall back to the main-repo checkout when a worktree worker is blocked.** A blocked worker yields a `status: "blocked"` fix report, not a shortcut that writes to main. See the "fall back to main" anti-pattern in the Branch isolation contract.
 
@@ -78,7 +78,7 @@ SCOPE_SLUG=$(echo "${SCOPE:-repo}" | tr '/' '-' | tr -cd '[:alnum:]-' | sed 's/^
 RUN_ID="$(date -u +%Y%m%d-%H%M%S)-${SCOPE_SLUG}"
 ```
 
-Record `run_id` in `config.json`. Every branch MUST be named `bounty/<run_id>/<bundle>` (see Branch isolation contract). Two concurrent bounty runs in the same repo scope to different run ids and therefore different branches.
+Record `run_id` in `config.json`. Every branch MUST be named `bounty/<run_id>/<bundle>` and MUST be created via `git worktree add -b` — no branch without a worktree (see Branch isolation contract). Two concurrent bounty runs in the same repo scope to different run ids and therefore different branches.
 
 ### 0b. Scan for existing runs
 
@@ -249,6 +249,38 @@ Skip Clawd if memory records the user prefers terse output. The table is the con
 
 All commits produced by a bounty run land on branches named `bounty/<run_id>/<bundle>` cut from `origin/main` inside isolated worktrees. **Never** on the user's current branch. **Never** on `main`.
 
+### Branches only exist inside worktrees — non-negotiable
+
+Every `bounty/<run_id>/*` branch is created **exclusively** via `git worktree add -b <branch> <path> origin/main` — a single atomic step. `git branch bounty/…`, `git checkout -b bounty/…`, and `git switch -c bounty/…` in the main repo are all forbidden. A branch without a matching worktree is a leak, not a staging step.
+
+Why: past runs produced `bounty/<run_id>/*` branches with committed work and no worktree anyone could audit. The "main stayed clean" leak sweep passed while the actual work sat in limbo. The rule is absolute — no branch without a worktree.
+
+#### Orchestrator rules
+
+- Create every branch with `git -C "$MAIN_REPO" worktree add -b bounty/<run_id>/<slug> <worktree-path> origin/main`. The `-b` flag creates the branch and the checkout in one operation.
+- Never run `git branch bounty/…` or `git checkout -b bounty/…` in the main repo.
+- Never push a server-only branch (`git push origin <sha>:refs/heads/bounty/…`) without a matching local worktree.
+
+#### Worker rules (enforced in the worker prompt block below)
+
+Workers arrive in a worktree on a pre-created branch. They do **not** create, rename, or delete branches. `git branch`, `git checkout -b`, `git switch -c`, and `git worktree add` are all banned in the worker hard-rules block.
+
+#### Verification after every branch-creating step
+
+After Phase 4 dispatches worktrees, after Step 5b builds aggregates, and as part of every post-phase leak sweep, compare the branch list against the worktree list:
+
+```bash
+BRANCHES=$(git -C "$MAIN_REPO" for-each-ref --format='%(refname:short)' "refs/heads/bounty/$RUN_ID/*" | sort)
+WORKTREE_BRANCHES=$(git -C "$MAIN_REPO" worktree list --porcelain \
+    | awk '/^branch refs\/heads\/bounty\/'"$RUN_ID"'\//{print substr($2, 12)}' \
+    | sort)
+DANGLING=$(comm -23 <(echo "$BRANCHES") <(echo "$WORKTREE_BRANCHES"))
+```
+
+Any branch in `$DANGLING` halts the run. Branches with unique commits are renamed to `bounty-orphan-<run_id>/<slug>` for `/bounty-cleanup` to surface; pointer-only branches are deleted with `git branch -D`.
+
+One-liner per verification: `🌳 worktrees @ <phase>: <N> branches, <N> worktrees, 0 dangling`.
+
 ### The "fall back to main" anti-pattern — forbidden
 
 A prior run logged: *"worktree-isolated implementer agents got blocked on git/php -l permission prompts, so I completed the last fixes directly on the main-repo checkout."* **This must never happen again.** The orchestrator does not work around worktree permission prompts by moving work to the main repo. If a worktree worker is blocked on a tool prompt:
@@ -279,6 +311,10 @@ Every planner, implementer, and reviewer prompt must include this verbatim:
 
 ```
 You are in an isolated worktree on branch bounty/<RUN_ID>/<BUNDLE>.
+- Do NOT create new branches. `git branch <name>`, `git checkout -b <name>`,
+  `git switch -c <name>`, and `git worktree add` are all forbidden. The
+  orchestrator creates every bounty/<RUN_ID>/* branch via `git worktree add -b`
+  atomically. Your branch is already here.
 - Do NOT `git switch`, `git checkout`, or `git branch -D` to any other branch.
 - Do NOT push, do NOT open PRs. The orchestrator handles all network operations.
 - Do NOT write files outside this worktree. The only path outside the worktree you may write is $STATE_DIR, and only the specific filenames named in your prompt.
@@ -297,9 +333,19 @@ Any mismatch aborts the wave and triggers the leak sweep.
 
 ### Post-phase leak sweep
 
-After each phase that dispatches workers (planners, implementers, reviewers, PR-builders), re-run the 0c checks. If main-repo HEAD moved: STOP, surface to the user, do not auto-revert. If new files appeared under `CUR_DIRTY` that match bundle target files: move them to a `bounty-leak-<run_id>` branch (same pattern as moo-cleanup's WIP branch handling). Log a loud warning and continue — the user sees the leak branch in `/bounty-cleanup`.
+After each phase that dispatches workers (PoC agents, planners, implementers, reviewers, PR-builders), run **three** checks:
 
-Emit one leak-sweep one-liner per phase: `🧹 leak sweep @ <phase>: main unchanged, 0 leaks`.
+1. **Main unchanged** — re-run the 0c checks. If main-repo HEAD moved: STOP, surface to the user, do not auto-revert. If new files appeared under `CUR_DIRTY` that match bundle target files: move them to a `bounty-leak-<run_id>` branch (same pattern as moo-cleanup's WIP branch handling). Log a loud warning and continue.
+2. **No dangling branches** — run the `BRANCHES` vs `WORKTREE_BRANCHES` comparison above. Every `bounty/<run_id>/*` branch must have a matching worktree entry. Dangling branches halt the run and get renamed to `bounty-orphan-<run_id>/*`.
+3. **No stale worktrees** — the inverse: every worktree must still have a live branch. A worktree whose branch was deleted is an orphaned checkout; `git worktree remove --force <path>` it and log.
+
+One-liner per sweep:
+
+```
+🧹 leak sweep @ <phase>: main unchanged, 0 leaks, 0 dangling branches, 0 orphan worktrees
+```
+
+Any non-zero count replaces the matching segment with its detail and halts the run before the next dispatch.
 
 ## Live progress output
 
@@ -655,9 +701,21 @@ Print a one-liner per group so the user sees the plan before any branch is pushe
 
 ### Step 5b: Build each aggregate branch
 
-For each group: create `<slug>` off `origin/main`, cherry-pick the approved per-bug commits from their bundle branches preserving order, run aggregate validation. If validation fails, bisect, drop the offending commit, and record the drop in `pr-groups.json`. Never squash — the individual commits are the audit trail.
+For each group:
 
-Run a leak sweep (see Branch isolation contract) after all aggregates are built.
+1. Create the branch **and** its worktree atomically:
+
+   ```bash
+   git -C "$MAIN_REPO" worktree add -b "<slug>" \
+       "$MAIN_REPO/.temp/bounty/$RUN_ID/worktrees/<slug-last-segment>" \
+       origin/main
+   ```
+
+   The `-b` flag creates the branch as part of the worktree operation. `git branch <slug>` followed by `git worktree add` is forbidden (see Branch isolation contract — no branch without a worktree).
+2. Cherry-pick the approved per-bug commits from their bundle branches into the new worktree, preserving order.
+3. Run aggregate validation. If validation fails, bisect, drop the offending commit, and record the drop in `pr-groups.json`. Never squash — the individual commits are the audit trail.
+
+After all aggregates are built, run the branch-vs-worktree verification (`🌳 worktrees @ phase-5b: <N> branches, <N> worktrees, 0 dangling`) and the standard leak sweep. Both must pass before Step 5b.5.
 
 ### Step 5b.5: Pre-push secrets scan
 
