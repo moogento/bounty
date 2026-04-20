@@ -804,7 +804,7 @@ Each implementer prompt includes:
 - Instructions to:
   - Walk the plan bug-by-bug in the order declared by `commit_order`
   - **TDD cycle per bug** when `test_strategy: tdd`: write the failing test first, confirm it fails, implement the minimal fix, confirm it passes, run validation, commit
-  - One commit per bug. Never squash. Commit message follows the repo's `<module>: <benefit>` format; reference `BUG-<id>` in the body (never the title)
+  - One commit per bug. Never squash. Commit message follows the repo's `<module>: <benefit>` format and the three hard title rules in `references/scoring-rules.md#commit-message-rules`: (1) no "bounty" or tool branding, (2) no PR number (PR numbers belong in the PR body, not the commit title), (3) positive framing — no `fix`, `fixed`, `bug`, `bugs`, `error`, `issue`, `broken`, etc. in the title. Reference `BUG-<id>` in the body, never in the title.
   - Run project validation after each bug. If a bug cannot pass, skip it and write `$STATE_DIR/fixes/<BUG-ID>.json` with `{"status": "skipped", "reason": "..."}` — do not block the rest of the bundle
   - Write one `$STATE_DIR/fixes/<BUG-ID>.json` per bug on completion (files changed, test added, validation output, commit SHA)
   - Return a final bundle summary: `<bundle>: <done>/<total> fixed, <skipped> skipped`
@@ -1046,7 +1046,7 @@ EOF
 
 Skip the reply comment entirely when every new comment was `VALID` or `SKIP`, **or** when `pr_review_replies` is `false` (the user opted out at Phase 0). Either way, the worker records the same INVALID verdicts + rationale in `$STATE_DIR/pr-review/<pr-number>.json` so the final report can surface them even when posting is off.
 
-**6. Commit and push** fixes as a single combined commit per round. Follow the repo's commit rules (no `fix:` / `feat:` prefix, lowercase module, no AI attribution):
+**6. Commit and push** fixes as a single combined commit per round. Follow the three hard title rules in `references/scoring-rules.md#commit-message-rules`: no "bounty" or tool branding, no PR number (not even as `(#1234)` suffix — the platform adds its own metadata), positive framing only. Lowercase module, no AI attribution, no `fix:` / `feat:` prefix:
 
 ```
 <module>: improved code quality from automated review (round <N>)

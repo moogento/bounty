@@ -89,9 +89,50 @@ N specialists hunted **{scope}** and confirmed **{confirmed}** issues. **{fixed}
 
 ## Commit message rules
 
+Three hard title rules. Every implementer prompt and every Step-5e PR-feedback commit enforces these. Any commit whose title violates a rule gets amended before the bundle branch is left alone — a violation caught post-merge is a process failure.
+
+### 1. Never mention "bounty" in the title
+
+No "bounty", "bounty sweep", "bounty run", "bounty hunt", or any tool-branded phrase. The title lives in the long-term git log and should read like normal product work, not like the output of a specific tool. The bounty framing belongs in the PR body's "Bounty run summary" section, never in the commit or PR title.
+
+- Bad: `smartcart: Resolved 11 issues from bounty sweep`
+- Bad: `bounty: fixed 7 security issues`
+- Bad: `multiple: discovered and resolved N bugs via bounty run`
+- Good: `smartcart: Reduced risk and improved reliability`
+
+### 2. Never mention the PR number in the title
+
+Pull-request numbers (`#1234`, `(#1234)`, `PR #1234`, `pull/1234`) are platform-ephemeral: they identify the review artifact, not the change. The commit outlives the PR. PR numbers belong in the PR body (`> Siblings: #<pr-1>, #<pr-2>` cross-links) and in merge-commit metadata that the platform generates automatically — never in the title the implementer types.
+
+This rule applies to:
+
+- Per-bug commits on bundle branches (Step 4c)
+- Step 5e PR-feedback-round commits (`<module>: improved code quality from automated review (round <N>)` — no `(#1234)` suffix)
+- Any `gh pr merge --subject …` override the orchestrator generates
+
+- Bad: `smartcart: Reduced risk and improved reliability (#1234)`
+- Bad: `ledger: Hardened balance updates PR #412`
+- Bad: `blackpearl: Tightened payment replay defense — fixes #87`
+- Good: `smartcart: Reduced risk and improved reliability`
+
+### 3. Positive framing — no bugs, fixes, or errors in the title
+
+Title verbs describe the **outcome** a reader cares about, not the defect that motivated the change. Use imperative-past benefit statements: *Hardened*, *Reduced*, *Improved*, *Tightened*, *Clarified*, *Streamlined*.
+
+Do not use `fix`, `fixes`, `fixed`, `fixing`, `bug`, `bugs`, `error`, `errors`, `issue`, `issues`, `crash`, `broken`, `regression`, or `problem` in the title (per repo `.guidelines/git-standards.md`). A reader six months from now should be able to read the title and understand what got better, not what used to be broken.
+
+- Bad: `smartcart: fix SQL injection bug in order placement`
+- Bad: `ledger: fixes concurrency errors on balance updates`
+- Bad: `blackpearl: resolved issues with payment token replay`
+- Good: `smartcart: Hardened order placement against injected payloads`
+- Good: `ledger: Tightened concurrency around balance updates`
+- Good: `blackpearl: Hardened payment-token handling against replay`
+
+The defect-focused language ("fixes SQL injection bug") is perfectly fine **in the commit body** alongside the BUG-ID and the explanation of what was wrong. The body is where the cause lives; the title is where the outcome lives.
+
+### Format and body
+
 - Format: `<module>: <benefit-focused summary>` — lowercase module, no AI attribution
-- Never use `fix`, `fixes`, `bug`, `error` in the title (per repo `.guidelines/git-standards.md`)
-- **Never mention "bounty", "bounty sweep", "bounty run", or bug counts in the title.** A title like `smartcart: Resolved 11 issues from bounty sweep` is count-specific and tool-branded; use `smartcart: Reduced risk and improved reliability` instead. The bounty framing lives in the commit body (BUG-ID reference) and the PR body, not the title.
 - Body: what the bug was in plain language, how the fix addresses it, any risk notes
 - Reference the BUG-ID in the body, not the title
 
