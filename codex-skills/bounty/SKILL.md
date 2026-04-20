@@ -45,6 +45,9 @@ Parse the user request for these optional flags or settings:
 | `--pr-review-rounds N` | 2 | Step 5e polls each opened PR for automated-review comments, validates them, fixes valid ones, and (when replies are on) replies with rationale to invalid ones, up to N rounds per PR |
 | `--pr-review-wait <secs>` | 300 | How long to wait after opening a PR before the first round of feedback polling (gives CI + bot reviewers time to post) |
 | `--pr-review-replies` / `--no-pr-review-replies` | ask | Whether Step 5e posts a rationale reply on each PR for suggestions marked `INVALID`. Explicit flag skips the Phase-0 verify; when neither is set, verify with the user at Phase 0 (default `on` after 30s timeout). Resolved choice is recorded in `config.json` as `pr_review_replies` |
+| `--dismissed-file <path>` | `.bounty/dismissed.yml` | Per-repo memory of patterns previously confirmed NOT to be bugs. Loaded at Phase 0d, passed to hunters, used to auto-dismiss matching claims before voting |
+| `--persist-dismissed` / `--no-persist-dismissed` | ask | Whether to offer appending voter-confirmed false positives to the dismissed file at end of Phase 3. Explicit flag skips the prompt; neither flag → ask the user when at least one FP lands (default `on` after 30s timeout) |
+| `--ignore-dismissed` | false | Debugging/rediscovery: skip the dismissed-file load entirely this run |
 | `--fresh` | false | At Phase 0, proceed alongside any existing `.temp/bounty/<id>/` dirs without prompting (each run uses its own state dir) |
 | `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
@@ -144,6 +147,21 @@ Prompt:
 ```
 
 On `y` / timeout: `pr_review_replies: true`. On `n`: `pr_review_replies: false`. Record the resolved value in `config.json` so `--resume` does not re-prompt. Announce the outcome once: `✓ PR rationale replies: on` or `… off`. Step 5e still records every INVALID verdict in `$STATE_DIR/pr-review/<pr-number>.json` regardless of the flag — only the GitHub-facing comment is gated.
+
+**Load the per-repo dismissed-bug memory.** The repo can keep a list of patterns already determined NOT to be bugs under `--dismissed-file` (default `.bounty/dismissed.yml` at the repo root, outside `$STATE_DIR` so it survives across runs). Schema + matching rules: see `../../skills/bounty/references/state-schema.md#bountydismissedyml-per-repo-outside-state_dir`.
+
+Load the file at Phase 0 (skip if missing or `--ignore-dismissed`). Snapshot into `$STATE_DIR/dismissed.yml` so the run is self-contained; all downstream reads use the snapshot. Announce once: `📒 dismissed list: <N> entries loaded from .bounty/dismissed.yml`. The list will be (1) inlined into every hunter prompt, (2) used at Phase 3 start to pre-filter claims as auto-FP, and (3) optionally appended to with voter-confirmed FPs at end of Phase 3.
+
+Resolve `persist_dismissed` the same three-state way as `pr_review_replies`:
+
+| Command-line | Resolved | Prompt? |
+|--------------|----------|---------|
+| `--persist-dismissed` | `true` | No |
+| `--no-persist-dismissed` | `false` | No |
+| `--ignore-dismissed` | `false` | No |
+| neither | ask at end of Phase 3 | Yes |
+
+Record the resolved value in `config.json`.
 
 **Probe the voter-tier model** before the hunt: fire one throwaway call at `$MODEL_VOTE` and catch a rate-limit / usage-cap error. If it fires, warn the user:
 
@@ -349,6 +367,7 @@ Each hunter receives:
 - the resolved scope
 - the recon report
 - the severity floor
+- the **dismissed list** (contents of `$STATE_DIR/dismissed.yml` — see Phase 0d) inlined verbatim. Instruction: "Before filing a claim, scan this list; if the claim matches an entry's file-glob *and* category, do not file it unless you have strong evidence the rationale does not apply (e.g. the code has changed). If you override a dismissal, include `override_reason` in the claim JSON." Skip this when the list is empty or `--ignore-dismissed` was set.
 - the claim schema from `state-schema.md`
 
 Each hunter must:
@@ -383,6 +402,28 @@ The orchestrator then:
 - enforces `--max-claims` by keeping the highest-severity claims first
 
 ## Phase 3: Voting
+
+### Pre-filter against the dismissed list
+
+Before dispatching voters, walk every surviving claim and test it against the dismissed entries loaded at Phase 0d. A claim matches when both its file matches an entry's glob *and* its category overlaps an entry's category token.
+
+For each match:
+
+1. Write a synthetic `FALSE_POSITIVE` tally into `$STATE_DIR/tally.json` with `resolution_source: "dismissed-list"` and `dismissed_entry_id: "<id>"`.
+2. Do **not** dispatch voters on that claim.
+3. Do **not** apply the −3 finder penalty — the hunter was given the list and a policy call should not tank a specialist's score. Record `points_awarded: 0` with reason `dismissed-policy`.
+4. Log one-liner: `📒 auto-FP: <BUG-ID>  matches <entry-id> (<entry-title>)`
+5. Re-render the leaderboard.
+
+Skip this step when the dismissed list is empty or `--ignore-dismissed` was set.
+
+### Persist new false positives at end of Phase 3
+
+After voting settles, batch-prompt the user for every `FALSE_POSITIVE` whose `resolution_source` is `voter` (not `dismissed-list`). Reply options: `all`, `pick <ids>`, `none`, `edit`. Default `all` on 30s timeout. On confirm, append entries to the live `.bounty/dismissed.yml` (atomic temp-file + rename) with a best-effort `title` and `rationale` composed from voter reasons.
+
+Skip when `persist_dismissed: false` was resolved or zero voter-FPs surfaced this run.
+
+### Voting modes
 
 Resolve the voting mode from `--voting-mode` first. Announce it at phase start:
 
@@ -554,7 +595,9 @@ Run a leak sweep (see Branch isolation contract) after all aggregates are built.
 
 ### Step 5c: Push and open PRs
 
-Use `gh` or the GitHub connector to push each aggregate branch and open its PR. Title: `<module>: batch N/M — <theme>`. Body uses the template from `../../skills/bounty/references/scoring-rules.md` and cross-links the siblings:
+Use `gh` or the GitHub connector to push each aggregate branch and open its PR. Body uses the template from `../../skills/bounty/references/scoring-rules.md` and cross-links the siblings.
+
+**PR titles must read like normal product work** — lead with the module, then a positive benefit statement (imperative-past). Do NOT mention "bounty", "bounty sweep", "bounty run", or numeric bug counts in the title. The bounty framing belongs in the body, not the title. See `../../skills/bounty/references/scoring-rules.md#title-style--positive-module-generic-no-bounty-branding` for worked examples. Summary: `smartcart: Reduced risk and improved reliability` — not `smartcart: Resolved 11 issues from bounty sweep`. The same rule applies if you pass `--subject` when merging (`gh pr merge … --squash --subject …`) — mirror the PR title style; never reintroduce bounty branding.
 
 ```
 > Part N of M from bounty run <run_id>.

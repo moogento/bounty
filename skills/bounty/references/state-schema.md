@@ -23,7 +23,16 @@ Directory layout:
     <bundle>.json       # per-bundle review verdicts (one APPROVE/REJECT per bug)
   pr-review/
     <pr-number>.json    # Step 5e — per-PR automated-review feedback rounds (processed ids, verdicts, fix commits, rejection replies)
+  dismissed.yml         # Phase 0d snapshot of the per-repo dismissed list (copy of .bounty/dismissed.yml at run start)
   README.md             # live human-readable dashboard
+```
+
+The **per-repo** dismissed list lives outside `$STATE_DIR` so it survives across runs:
+
+```
+<repo-root>/
+  .bounty/
+    dismissed.yml       # hand-editable; loaded at Phase 0d; appended after voter-confirmed FPs (opt-in)
 ```
 
 ## `config.json`
@@ -286,6 +295,46 @@ Written by the Step 5e PR-feedback worker. One file per PR, one `rounds[]` entry
 
 `status` ∈ {`committed`, `skipped`, `reverted`}. `skipped` means the implementer couldn't make the bug pass and logged a reason. `reverted` is set by the orchestrator after a Step 4d rejection drops the commit from the bundle branch. Reviewer verdicts are held in `reviews/<bundle>.json`, not duplicated here.
 
+## `.bounty/dismissed.yml` (per-repo, outside `$STATE_DIR`)
+
+Hand-editable memory of patterns previously determined NOT to be bugs in this codebase. Lives under source control so it persists across bounty runs and team members. Phase 0d loads it and snapshots a copy into `$STATE_DIR/dismissed.yml` for the run.
+
+```yaml
+version: 1
+dismissed:
+  - id: MOO-001
+    added: 2026-04-20
+    run_id: 20260420-030000-smartcategories     # optional — the run that first surfaced it
+    files:
+      - "app/code/Moogento/**/view/adminhtml/templates/system/config/hint.phtml"
+    categories: ["security", "xss", "supply-chain"]
+    title: Raw HTML in Moogento hint templates
+    rationale: |
+      Moogento controls the upstream content shown in these hint.phtml
+      templates; raw HTML is intentional for formatting (links, emphasis,
+      occasional images). The Moo.php null guard is the relevant safeguard
+      around missing keys — escaping the HTML would break rendering with no
+      security benefit.
+```
+
+Field semantics:
+
+- `id` — stable identifier. Orchestrator auto-assigns `<SCOPE-PREFIX>-NNN` when appending; humans can edit.
+- `files` — fnmatch-style globs, matched against `claim.file` after normalization.
+- `categories` — list of category tokens. Match is substring, case-insensitive, any-overlap.
+- `title` — one-line human label (used in the auto-FP log line).
+- `rationale` — free-text prose. Included verbatim in hunter prompts so the hunter can judge whether a specific claim overrides the dismissal.
+- `added`, `run_id` — provenance. `added` is required on new entries; `run_id` is optional.
+
+Matching rule for "should this claim be auto-FP'd?":
+
+```
+match = file_matches_any(claim.file, entry.files)
+    AND categories_overlap(claim.category, entry.categories)
+```
+
+Both must be true. A partial match (one side only) surfaces as a debug log line but does not auto-dismiss — the claim still goes to voting.
+
 ## Atomicity
 
 Every file write uses a temp-file + rename pattern so readers never see a half-written file:
@@ -295,4 +344,4 @@ tmp=$(mktemp .temp/bounty/leaderboard.json.XXXX)
 jq '.' > "$tmp" && mv "$tmp" .temp/bounty/leaderboard.json
 ```
 
-This matters because multiple agents in worktrees may write to the same state directory concurrently.
+This matters because multiple agents in worktrees may write to the same state directory concurrently. The per-repo `.bounty/dismissed.yml` uses the same pattern when the orchestrator appends new entries.

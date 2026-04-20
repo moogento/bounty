@@ -41,6 +41,21 @@ Render to stdout and to `.temp/bounty/README.md` after every resolution. The std
 
 Use this when opening the aggregate PR via `gh pr create`. Keep the title format `<modulename>: <benefit>` per repo git-standards (no `fix:` / `feat:` prefixes).
 
+### Title style — positive, module-generic, no bounty branding
+
+The PR and merge titles will live in the long-term git log. They should read like normal product work, not as the output of a specific tool. **Do not mention "bounty", "bounty sweep", "bounty run", or numeric bug counts in the title.** Past title seen in the wild: `smartcart: Resolved 11 risk and reliability issues from bounty sweep` — that's bounty-branded and count-specific. Better: `smartcart: Reduced risk and improved reliability`.
+
+Write titles as a benefit statement in the imperative-past ("Hardened X", "Reduced Y", "Improved Z", "Tightened …"), describing the *outcome* a reader cares about — not the bounty machinery that produced it. A reader six months from now should be able to read the title and care about what changed.
+
+- Good: `blackpearl: Hardened order placement against replayed payment tokens`
+- Good: `ledger: Tightened concurrency around balance updates`
+- Good: `smartcart: Reduced risk and improved reliability`
+- Bad:  `smartcart: Resolved 11 issues from bounty sweep`
+- Bad:  `multiple: discovered and resolved N bugs via bounty run`
+- Bad:  `bounty: fixed 7 security issues`
+
+The "bounty run" framing belongs in the PR **body** (the "Bounty run summary" section below), not the title or any merge subject. The same rule applies to `gh pr merge --subject …` — if you set a custom squash subject, mirror the PR title style; do not reintroduce "bounty sweep".
+
 ```
 ## Bounty run summary
 
@@ -73,6 +88,7 @@ N specialists hunted **{scope}** and confirmed **{confirmed}** issues. **{fixed}
 
 - Format: `<module>: <benefit-focused summary>` — lowercase module, no AI attribution
 - Never use `fix`, `fixes`, `bug`, `error` in the title (per repo `.guidelines/git-standards.md`)
+- **Never mention "bounty", "bounty sweep", "bounty run", or bug counts in the title.** A title like `smartcart: Resolved 11 issues from bounty sweep` is count-specific and tool-branded; use `smartcart: Reduced risk and improved reliability` instead. The bounty framing lives in the commit body (BUG-ID reference) and the PR body, not the title.
 - Body: what the bug was in plain language, how the fix addresses it, any risk notes
 - Reference the BUG-ID in the body, not the title
 

@@ -34,6 +34,9 @@ Parse `$ARGUMENTS` for these flags (all optional):
 | `--pr-review-rounds N` | 2 | Step 5e polls each opened PR for automated-review comments, validates them, fixes the valid ones, and (when replies are on) replies with a rationale to the invalid ones, up to N rounds per PR |
 | `--pr-review-wait <secs>` | 300 | How long to wait after opening a PR before the first round of feedback polling, giving CI + bot reviewers time to post |
 | `--pr-review-replies` / `--no-pr-review-replies` | ask | Whether Step 5e posts a consolidated rationale comment on each PR for suggestions marked `INVALID`. Explicit flag skips the Phase-0 verify; when neither is set, the orchestrator verifies with the user at Phase 0 (default `on` after 30s timeout). Records the resolved choice in `config.json` as `pr_review_replies` |
+| `--dismissed-file <path>` | `.bounty/dismissed.yml` | Per-repo memory file of patterns previously confirmed NOT to be bugs. Loaded at Phase 0 and passed to every hunter + used to auto-dismiss matching claims before voting |
+| `--persist-dismissed` / `--no-persist-dismissed` | ask | Whether to offer appending voter-confirmed false positives to the dismissed file at end of Phase 3. Explicit flag skips the prompt; neither flag → ask the user when at least one FP lands (default `on` after 30s timeout) |
+| `--ignore-dismissed` | false | Debugging/rediscovery: skip the dismissed-file load entirely this run. Hunters re-surface patterns that would normally be filtered |
 | `--fresh` | false | At Phase 0, proceed alongside any existing `.temp/bounty/<id>/` dirs without prompting (each run uses its own state dir) |
 | `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
@@ -145,6 +148,68 @@ When prompting, print:
 Wait up to 30s. On `y` / timeout: `pr_review_replies: true`. On `n`: `pr_review_replies: false`. Record the resolved value in `config.json` so a later `--resume` does not re-prompt. Announce the resolved value once: `✓ PR rationale replies: on` or `… off`.
 
 Step 5e still evaluates every comment and still records INVALID verdicts in `$STATE_DIR/pr-review/<pr-number>.json` regardless — the flag only controls whether the rationale comment is posted to GitHub. The final report always summarizes what would have been replied to, so the user sees the reasoning even when posting is off.
+
+**Load the per-repo dismissed-bug memory.** A repo can keep a list of patterns already determined NOT to be bugs. The bounty skill persists and reads this list so the same false-positive doesn't keep showing up run after run. Path defaults to `--dismissed-file` (`.bounty/dismissed.yml` at the repo root — outside `$STATE_DIR`, so it is shared across runs and lives under source control).
+
+Schema (`version: 1`):
+
+```yaml
+version: 1
+dismissed:
+  - id: MOO-001
+    added: 2026-04-20
+    run_id: 20260420-030000-smartcategories   # optional — the run that first surfaced it
+    files: ["app/code/Moogento/**/view/adminhtml/templates/system/config/hint.phtml"]
+    categories: ["security", "xss", "supply-chain"]
+    title: Raw HTML in Moogento hint templates
+    rationale: |
+      Moogento controls the upstream content; raw HTML is intentional for
+      formatting. The Moo.php null guard is the relevant safeguard.
+```
+
+Load the file at Phase 0 (skip if missing or `--ignore-dismissed`). Copy its contents into `$STATE_DIR/dismissed.yml` so the run's state dir is self-contained; the orchestrator reads from `$STATE_DIR/dismissed.yml` thereafter. Announce once at Phase 0:
+
+```
+📒 dismissed list: 4 entries loaded from .bounty/dismissed.yml
+```
+
+A claim **matches a dismissed entry** when both are true:
+
+- the claim's file matches any glob in `entry.files` (fnmatch-style, e.g. `app/code/Moogento/**/hint.phtml`)
+- the claim's category (case-insensitive substring, or a word in the claim's category) overlaps any token in `entry.categories`
+
+Matching is used in two places:
+
+1. **Phase 2 (hunt)** — every hunter prompt includes the full `dismissed` list inline. Instruction: "Before filing a claim, scan this list; if the claim matches an entry, do not file it unless you have strong evidence overriding the rationale. If you override, include `override_reason` in the claim JSON; orchestrator will still pre-check."
+2. **Phase 3 start** — after hunting, before voting dispatch, the orchestrator iterates surviving claims and auto-marks any matching claim as `FALSE_POSITIVE` with `resolution_source: "dismissed-list"` and a pointer to the entry id. **No finder penalty** for these — the hunter saw the list and the hunter's judgment should not be tanked by a policy call. Log one-liner per auto-dismissal:
+
+   ```
+   📒 auto-FP: BUG-security-1-003  matches MOO-001 (Raw HTML in Moogento hint templates)
+   ```
+
+   Write the auto-FP result to `$STATE_DIR/tally.json` with the standard shape so the leaderboard renders normally. These claims do NOT go to voters — they skip Phase 3 voting entirely.
+
+3. **End of Phase 3** — any claim that actually went to vote and came back `FALSE_POSITIVE` is a candidate for the dismissed list. If `persist_dismissed` resolves to `true`, batch-prompt the user:
+
+   ```
+   📒 3 new false positives surfaced this run. Persist to .bounty/dismissed.yml so future runs skip them?
+      [1] BUG-security-1-007  app/Controller/Orders.php:142  "SQL injection via X-Forwarded-For"  — voters: 5 FP / 0 VALID
+      [2] …
+      Reply:  (a) all  (b) pick 1,3  (c) none  (d) edit — default (a) in 30s
+   ```
+
+   On `all` / timeout: append one entry per FP to `.bounty/dismissed.yml` with a best-effort `title` and `rationale` derived from voter reasons. On `pick`: only the chosen ids. On `edit`: open $EDITOR with a prefilled template. On `none`: skip.
+
+Resolve `persist_dismissed` the same three-state way as `pr_review_replies`:
+
+| Command-line input | Resolved | Prompt? |
+|--------------------|----------|---------|
+| `--persist-dismissed` | `true` | No |
+| `--no-persist-dismissed` | `false` | No |
+| `--ignore-dismissed` (also disables loading) | `false` | No |
+| neither flag | ask the user at end of Phase 3 | Yes |
+
+Record the resolved value in `config.json`.
 
 **Probe the voter-tier quota.** Before dispatching hunters, fire one throwaway haiku call (or whatever `$MODEL_VOTE` resolves to) and catch a `rate-limit` / `usage limit` error. If it fires, warn the user:
 
@@ -373,6 +438,7 @@ Each prompt must include:
 - `STATE_DIR=<absolute path>` (see Phase 0). Every claim file must be written as `$STATE_DIR/claims/BUG-<lens>-<seed>-<seq>.json` with the absolute path — never a relative `.temp/bounty/...` which silently lands in the worktree
 - The recon report, inlined verbatim (not referenced by path — worktree agents can't read the main repo's path)
 - The severity floor
+- **The dismissed list** (contents of `$STATE_DIR/dismissed.yml` — see Phase 0d) inlined verbatim. Instruct the hunter: "Before filing a claim, scan this list; if the claim matches an entry's file-glob *and* category, do not file it unless you have strong evidence the rationale does not apply (e.g. the code has changed). If you override a dismissal, include `override_reason` in the claim JSON." Skip this entirely when the list is empty or `--ignore-dismissed` was set.
 - A **tool-call budget**: cap `Read` calls at 20 and `Grep`/`Glob` calls at 15. If they need to read more, they've scoped too widely and should stop and submit what they have. This prevents the "Prompt is too long" blowout that kills hunters at 100+ tool calls.
 - Instructions to:
   - Scan their lens from the prompt-seed entry point first, then broaden
@@ -426,6 +492,49 @@ Unlike exact-fingerprint collisions, semantic merges are *suggestive* — the or
 If total claims exceed the cap, keep the highest-severity claims and drop the rest. Log the drop count.
 
 ## Phase 3: Parallel voting
+
+### Pre-filter against the dismissed list
+
+Before dispatching any voters, walk every surviving claim and test it against the dismissed entries loaded at Phase 0d. A claim matches when both its file matches an entry's glob AND its category overlaps an entry's category token.
+
+For each matching claim:
+
+1. Write a synthetic `FALSE_POSITIVE` tally straight into `$STATE_DIR/tally.json` with `resolution_source: "dismissed-list"` and `dismissed_entry_id: "<id>"`.
+2. Do **not** dispatch voters on that claim. It skips Phase 3 voting entirely.
+3. Do **not** apply the −3 finder penalty — the hunter was given the list, the override may have been legitimate, and policy calls should not tank a hunter's score. Record `points_awarded: 0` with reason `dismissed-policy`.
+4. Log one-liner:
+
+```
+📒 auto-FP: BUG-security-1-003  matches MOO-001 (Raw HTML in Moogento hint templates)
+```
+
+5. Re-render the leaderboard (totals increment under FP but score unchanged).
+
+Skip this step entirely when the dismissed list is empty or `--ignore-dismissed` was set.
+
+### Persist new false positives at end of Phase 3
+
+After all votes have resolved and the leaderboard updates have settled, batch-prompt the user for every `FALSE_POSITIVE` whose `resolution_source` is **`voter`** (not `dismissed-list` — those are already in the file):
+
+```
+📒 3 new false positives surfaced this run. Persist to .bounty/dismissed.yml so future runs skip them?
+   [1] BUG-security-1-007  app/Controller/Orders.php:142  "SQL injection via X-Forwarded-For"  — voters: 5 FP / 0 VALID
+   [2] BUG-authz-1-004     app/Controller/Admin.php:88    "Missing ACL on admin action"         — voters: 3 FP / 1 VALID / 1 abstain
+   [3] BUG-xss-1-002       app/View/helper.phtml:33       "Raw output in helper"                — voters: 4 FP / 0 VALID
+   Reply:  (a) all  (b) pick 1,3  (c) none  (d) edit — default (a) in 30s
+```
+
+On `all` / timeout: append one entry per FP with a best-effort `title` (claim category + short file path) and `rationale` composed from the top voter reasons. On `pick`: keep only chosen ids. On `edit`: open `$EDITOR` on the generated YAML so the user can refine each `rationale` before committing. On `none`: skip.
+
+Write to the live `.bounty/dismissed.yml` (not `$STATE_DIR/dismissed.yml`) so the update persists for future runs. Use atomic temp-file + rename:
+
+```bash
+tmp="$(mktemp "$MAIN_REPO/.bounty/dismissed.yml.XXXX")"
+yq '.dismissed += [$new_entries]' "$MAIN_REPO/.bounty/dismissed.yml" --argjson new_entries "$ENTRIES_JSON" > "$tmp" \
+  && mv "$tmp" "$MAIN_REPO/.bounty/dismissed.yml"
+```
+
+Skip this step when `persist_dismissed: false` was resolved at Phase 0d. Skip also when zero voter-confirmed FPs surfaced this run.
 
 ### Voting modes
 
@@ -679,7 +788,13 @@ Emit a leak-sweep check (see Branch isolation contract) after all aggregates are
 
 ### Step 5c: Push and open PRs
 
-Push each aggregate branch and open its PR via `gh pr create`. Use the template from `references/scoring-rules.md`. Cross-link sibling PRs in every body:
+Push each aggregate branch and open its PR via `gh pr create`. Use the template from `references/scoring-rules.md`.
+
+**PR titles must read like normal product work.** Lead with the module, followed by a positive benefit statement (imperative-past). Do NOT mention "bounty", "bounty sweep", "bounty run", or numeric bug counts in the title — those live in the body. See `references/scoring-rules.md#title-style--positive-module-generic-no-bounty-branding` for worked examples. Summary: `smartcart: Reduced risk and improved reliability` — not `smartcart: Resolved 11 issues from bounty sweep`.
+
+The same rule applies to any `gh pr merge --subject …` override the orchestrator might generate when merging (e.g. when `/bounty-cleanup` is configured to squash) — the squash subject should mirror the PR title style, never reintroduce bounty branding.
+
+Cross-link sibling PRs in every body:
 
 ```
 > Part N of M from bounty run 20260420-143000-smartcart.

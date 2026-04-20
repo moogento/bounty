@@ -99,6 +99,8 @@ gh pr merge "$PR_NUMBER" --squash --delete-branch \
   || gh pr merge "$PR_NUMBER" --merge --delete-branch
 ```
 
+**Do not pass `--subject` unless you have a specific reason.** Without it, GitHub uses the PR title as the squash subject, which is what we want. If you *must* override it, mirror the PR title style (`<module>: <positive benefit>`) — no "bounty", "bounty sweep", "bounty run", or numeric bug counts, no `fix:` / `feat:` prefixes. See `skills/bounty/references/scoring-rules.md#title-style--positive-module-generic-no-bounty-branding`. The title ends up in the repo's permanent git log; it should read like normal product work, not like tool output.
+
 If the merge fails (checks required, conflicts, permission), report the error and skip this PR. Move to the next.
 
 ### 2b. Detect subagent leaks vs WIP
