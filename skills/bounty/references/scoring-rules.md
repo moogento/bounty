@@ -5,8 +5,11 @@
 | Event | Points |
 |-------|--------|
 | Claim confirmed | +1 |
+| PoC reproduced (Phase 3.5) | +1 bonus |
+| PoC failed to reproduce | −3 (demoted to FALSE_POSITIVE; flows through `fp`) |
 | False positive (majority + FP quorum) | −3 |
 | Fix approved (2/2 reviewers) | +1 |
+| Fix secrets-scan hit (Step 5b.5) | −1 reversal on the implementer's fix credit |
 | Fix rejected twice (abandoned) | 0 (no penalty, just lost the chance) |
 | Co-discovery (same fingerprint as earlier claim) | 0 |
 
@@ -24,17 +27,17 @@ Render to stdout and to `.temp/bounty/README.md` after every resolution. The std
 
 ```
 🏆 BOUNTY LEADERBOARD
-┌─────┬──────────────────┬───────┬──────┬─────┬───────┬───────┐
-│ #   │ Specialist       │ Found │ Conf │ FPs │ Fixes │ SCORE │
-├─────┼──────────────────┼───────┼──────┼─────┼───────┼───────┤
-│ 🥇  │ 🧵 Concurrency   │     3 │    3 │   0 │     2 │    +5 │
-│ 🥈  │ 🛡️  Security     │     5 │    4 │   1 │     1 │    +2 │
-│ 🥉  │ ⚡ Performance   │     2 │    2 │   0 │     0 │    +2 │
-│  4  │ ∅ NullSafety     │     2 │    1 │   0 │     1 │    +2 │
-│  5  │ 🔐 AuthZ         │     3 │    1 │   1 │     0 │    -2 │
-│  …  │ …                │     … │    … │   … │     … │     … │
-└─────┴──────────────────┴───────┴──────┴─────┴───────┴───────┘
- Confirmed: 11 │ FPs: 2 │ Inconclusive: 4 │ Fixed: 4 │ Pending: 3
+┌─────┬──────────────────┬───────┬──────┬─────┬─────┬───────┬───────┐
+│ #   │ Specialist       │ Found │ Conf │ PoC │ FPs │ Fixes │ SCORE │
+├─────┼──────────────────┼───────┼──────┼─────┼─────┼───────┼───────┤
+│ 🥇  │ 🧵 Concurrency   │     3 │    3 │   1 │   0 │     2 │    +6 │
+│ 🥈  │ 🛡️  Security     │     5 │    4 │   2 │   1 │     1 │    +4 │
+│ 🥉  │ ⚡ Performance   │     2 │    2 │   0 │   0 │     0 │    +2 │
+│  4  │ ∅ NullSafety     │     2 │    1 │   0 │   0 │     1 │    +2 │
+│  5  │ 🔐 AuthZ         │     3 │    1 │   0 │   1 │     0 │    -2 │
+│  …  │ …                │     … │    … │   … │   … │     … │     … │
+└─────┴──────────────────┴───────┴──────┴─────┴─────┴───────┴───────┘
+ Confirmed: 11 │ PoC reproduced: 3 │ FPs: 2 │ Inconclusive: 4 │ Fixed: 4 │ Pending: 3
 ```
 
 ## PR body template

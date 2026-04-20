@@ -23,6 +23,10 @@ Directory layout:
     <bundle>.json       # per-bundle review verdicts (one APPROVE/REJECT per bug)
   pr-review/
     <pr-number>.json    # Step 5e — per-PR automated-review feedback rounds (processed ids, verdicts, fix commits, rejection replies)
+  pocs/
+    <BUG-ID>.json       # Phase 3.5 — per-claim PoC verdict (reproduced, method, observed, expected_after_fix)
+    <BUG-ID>/           # Phase 3.5 — PoC artifacts (scripts, payloads, captured output). NEVER committed to any git branch
+  pr-groups.json        # Phase 5a — PR batching plan + per-group status (push url, blocked_by_secrets_scan, dropped commits)
   dismissed.yml         # Phase 0d snapshot of the per-repo dismissed list (copy of .bounty/dismissed.yml at run start)
   README.md             # live human-readable dashboard
 ```
@@ -136,19 +140,19 @@ The orchestrator's aggregate of every vote (full or panel), keyed by `bug_id`. R
 {
   "updated_at": "2026-04-19T14:50:00Z",
   "scores": {
-    "security":      {"found": 5, "confirmed": 4, "fp": 1, "collisions": 2, "fixes": 2, "score": 3},
-    "concurrency":   {"found": 3, "confirmed": 3, "fp": 0, "collisions": 1, "fixes": 1, "score": 4},
-    "performance":   {"found": 2, "confirmed": 2, "fp": 0, "collisions": 0, "fixes": 0, "score": 2},
-    "nullsafety":    {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "score": 0},
-    "errorhandling": {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "score": 0},
-    "authz":         {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "score": 0},
-    "dataintegrity": {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "score": 0},
-    "resources":     {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "score": 0}
+    "security":      {"found": 5, "confirmed": 4, "fp": 1, "collisions": 2, "fixes": 2, "poc_bonus": 2, "score": 5},
+    "concurrency":   {"found": 3, "confirmed": 3, "fp": 0, "collisions": 1, "fixes": 1, "poc_bonus": 0, "score": 4},
+    "performance":   {"found": 2, "confirmed": 2, "fp": 0, "collisions": 0, "fixes": 0, "poc_bonus": 0, "score": 2},
+    "nullsafety":    {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "poc_bonus": 0, "score": 0},
+    "errorhandling": {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "poc_bonus": 0, "score": 0},
+    "authz":         {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "poc_bonus": 0, "score": 0},
+    "dataintegrity": {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "poc_bonus": 0, "score": 0},
+    "resources":     {"found": 0, "confirmed": 0, "fp": 0, "collisions": 0, "fixes": 0, "poc_bonus": 0, "score": 0}
   }
 }
 ```
 
-Score formula: `confirmed * 1 + fixes * 1 − fp * 3`. `collisions` is the number of claims on this lens where `collision_count ≥ 2` (pre-validated by an independent same-lens hunter); it is a confidence signal only, not a scoring input.
+Score formula: `confirmed * 1 + fixes * 1 + poc_bonus * 1 − fp * 3`. `collisions` is the number of claims on this lens where `collision_count ≥ 2` (pre-validated by an independent same-lens hunter); it is a confidence signal only, not a scoring input. `poc_bonus` is the count of this lens's CONFIRMED claims that reproduced in Phase 3.5 (`+1` each); a PoC that fails to reproduce demotes the claim to FALSE_POSITIVE and the `−3` flows through `fp`, not `poc_bonus`.
 
 ## `queue.json`
 
@@ -294,6 +298,69 @@ Written by the Step 5e PR-feedback worker. One file per PR, one `rounds[]` entry
 ```
 
 `status` ∈ {`committed`, `skipped`, `reverted`}. `skipped` means the implementer couldn't make the bug pass and logged a reason. `reverted` is set by the orchestrator after a Step 4d rejection drops the commit from the bundle branch. Reviewer verdicts are held in `reviews/<bundle>.json`, not duplicated here.
+
+## `pocs/<BUG-ID>.json`
+
+Written by the Phase 3.5 PoC agent (one per eligible CONFIRMED claim). The artifacts directory `pocs/<BUG-ID>/` sits next to this file and holds scripts, payloads, and captured output — **never** committed.
+
+```json
+{
+  "bug_id": "BUG-security-1-001",
+  "reproduced": true,
+  "method": "curl -X POST https://localhost:8443/orders -d \"ip=' OR 1=1 --\" → 200 with 12482 rows",
+  "artifacts_dir": "/Users/jim/repo/.temp/bounty/20260419-142200-blackpearl/pocs/BUG-security-1-001/",
+  "observed": "Returned every row from moo_nmsp_log (12,482 rows, including admin IPs and session timing)",
+  "expected_after_fix": "Returns 400; prepared-statement binding rejects the quoted payload",
+  "elapsed_seconds": 47,
+  "model": "sonnet",
+  "status": "completed",
+  "at": "2026-04-19T14:55:02Z"
+}
+```
+
+Required fields: `bug_id`, `reproduced`, `method`, `observed`, `expected_after_fix`. `status` ∈ {`completed`, `malformed`, `contract_violation`, `timed_out`}.
+
+Outcome → effect on the claim (see SKILL.md Phase 3.5 for rules):
+
+- `reproduced: true` → claim stays CONFIRMED, finder gets `+1` PoC bonus, `claim.poc: true` flows into Phase 4
+- `reproduced: false` → claim demoted to FALSE_POSITIVE, finder gets standard `−3`; the PoC's `method` / `observed` become the rationale when the voter-confirmed-FP prompt offers to append to `.bounty/dismissed.yml`
+- `contract_violation` / `malformed` → claim unchanged, no bonus, flagged in final report
+
+## `pr-groups.json`
+
+Written at Step 5a. Updated in-place by 5b (validation drops), 5b.5 (secrets-scan hits), 5c (PR url), and 5e (review-round state lives in `pr-review/<pr-number>.json`, not here).
+
+```json
+{
+  "run_id": "20260420-143000-smartcart",
+  "groups": [
+    {
+      "slug": "bounty/20260420-143000-smartcart/pr-1-acl-and-csrf",
+      "bundles": ["fix-acl", "fix-csrf"],
+      "bug_ids": ["BUG-authz-1-001", "BUG-authz-1-002", "BUG-security-1-007"],
+      "commits": ["a1b2c3d", "b2c3d4e", "c3d4e5f"],
+      "bug_count": 8,
+      "est_lines": 312,
+      "status": "shipped",
+      "pr_url": "https://github.com/org/repo/pull/1234"
+    },
+    {
+      "slug": "bounty/20260420-143000-smartcart/pr-2-null-safety",
+      "bundles": ["fix-null-safety"],
+      "bug_ids": ["BUG-nullsafety-1-001"],
+      "commits": ["d4e5f60"],
+      "bug_count": 1,
+      "est_lines": 268,
+      "status": "blocked",
+      "blocked_by_secrets_scan": [
+        {"commit": "d4e5f60", "file": "tests/fixtures/config.php", "line": 17, "pattern": "aws-secret-key"}
+      ]
+    }
+  ]
+}
+```
+
+`status` ∈ {`planned`, `built`, `blocked`, `shipped`, `dropped`}. `blocked_by_secrets_scan` entries intentionally never include the matched secret text — only the pattern name, file, and line — so `pr-groups.json` is safe to attach to bug reports and share in screenshots.
 
 ## `.bounty/dismissed.yml` (per-repo, outside `$STATE_DIR`)
 

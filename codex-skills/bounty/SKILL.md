@@ -32,6 +32,8 @@ Parse the user request for these optional flags or settings:
 | `--hunters-per-lens K` | 1 | Hunters dispatched per lens; ≥2 treats collisions as validation |
 | `--severity <floor>` | `medium` | Discard claims below this severity |
 | `--max-claims N` | 40 | Cap total claims so the run stays bounded |
+| `--poc <mode>` | `auto` | Phase 3.5 PoC gate. `auto` = run for every CONFIRMED claim with severity ≥ `high`. `always` = every CONFIRMED claim. `off` = skip. A PoC that fails to reproduce demotes the claim to FALSE_POSITIVE (finder −3) |
+| `--secrets-scan` / `--no-secrets-scan` | on | Step 5b.5 scans each aggregate branch's diff for credential patterns before `gh pr create`. A hit blocks that PR group only; other groups still ship |
 | `--no-fix` | false | Skip fix/review/ship and stop at findings |
 | `--voting-mode <mode>` | `auto` | `full` = N−1 voters per claim. `panel` = 1 voter per specialty reviews every non-own claim. `auto` = `full` when claims ≤ 20, else `panel` |
 | `--max-fixes N` | 10 | If confirmed count exceeds, Phase 4 pauses for user to confirm/curate the bundle plan |
@@ -468,6 +470,61 @@ The orchestrator appends every vote to `$STATE_DIR/votes/<BUG-ID>.jsonl`, tallie
 
 Do not wait for the end of the batch to update the visible standings. The leaderboard update happens claim-by-claim.
 
+## Phase 3.5: Proof-of-concept (high/critical confirmed only)
+
+Skip when `--poc off` or `--no-fix` is set.
+
+For every CONFIRMED claim whose severity qualifies (`auto` = ≥ high; `always` = any), dispatch one PoC subagent per claim. PoCs reproduce the bug before the fix phase spends its biggest model on it; a PoC that fails to reproduce demotes the claim to FALSE_POSITIVE.
+
+### Worktree contract
+
+PoC agents run exploit code, so their contract is stricter than planners/implementers:
+
+```
+You are running a PoC for BUG-<id> in an isolated read-only worktree.
+- Do NOT write any file under the worktree (the repo checkout). Treat it as read-only.
+- Do NOT run `git add`, `git commit`, `git switch`, `git checkout`, or any branch operation.
+- Do NOT push anything anywhere.
+- The ONLY paths you may write to are under $POC_DIR ($STATE_DIR/pocs/<BUG-ID>/) and
+  the single file $STATE_DIR/pocs/<BUG-ID>.json.
+- If reproducing requires running the application, invoke it from $POC_DIR with
+  cwd=$POC_DIR — never from the worktree root. Copy (don't symlink) any sample
+  inputs you need into $POC_DIR first.
+```
+
+After the PoC returns, the orchestrator runs `git -C <worktree> status --porcelain`. Dirty worktree → PoC rejected with `status: "contract_violation"`, claim unchanged (no bonus, no demotion), loud warning in the final report. The worktree is discarded and a fresh one cut from `origin/main` before the next phase.
+
+### Dispatch
+
+For each eligible CONFIRMED claim, spawn one read-only worktree subagent (`agent_type: "worker"`, model `$MODEL_HUNT` — sonnet-tier). Run all eligible PoCs in parallel, batched in groups of 8, with a 10-minute wall-time cap per PoC. Each agent's prompt includes the claim JSON, the cited file ± 20 lines of context, the recon report, the repo's run/validation commands, `$POC_DIR`, `$STATE_DIR`, and the contract block above verbatim.
+
+### Output contract
+
+Each PoC writes:
+
+1. `$STATE_DIR/pocs/<BUG-ID>/` — artifacts (script, payload, captured output). Never committed.
+2. `$STATE_DIR/pocs/<BUG-ID>.json` — verdict (see `../../skills/bounty/references/state-schema.md#pocsbug-idjson` for the schema).
+
+Required fields on the JSON: `bug_id`, `reproduced`, `method`, `observed`, `expected_after_fix`. Missing any → `status: "malformed"` and the claim is treated as if `--poc off` for this bug.
+
+### Resolution
+
+| PoC outcome | Effect |
+|-------------|--------|
+| `reproduced: true` | Claim stays CONFIRMED, finder gets **+1 PoC bonus**, `claim.poc: true` flows into Phase 4 and the PR body |
+| `reproduced: false` | Claim demoted to FALSE_POSITIVE, finder gets standard **−3**. PoC rationale feeds the voter-confirmed-FP prompt at end of Phase 3 |
+| `contract_violation` / `malformed` | Claim unchanged, flagged in final report |
+
+Re-render the championship table after each PoC resolves. Print a one-liner per PoC:
+
+```
+🧪 PoC/BUG-security-1-001  REPRODUCED  method=sqli-via-xff  finder +1 → 🛡️ Security
+🧪 PoC/BUG-authz-1-007     DID-NOT-REPRODUCE  DEMOTED to FP  finder −3 → 🛡️ AuthZ
+🧪 PoC/BUG-resources-1-002 CONTRACT VIOLATION (wrote to worktree) — quarantined
+```
+
+PoC-demoted claims are folded into the same end-of-Phase-3 dismissed-list prompt as voter-confirmed false positives, tagged `[poc-demoted]` so the user sees which dismissals came from code-reading voters vs. from an exploit that failed to run.
+
 ## Phase 4: Bundled fixes
 
 Skip this phase when `--no-fix` is set.
@@ -555,7 +612,16 @@ For each completed bundle, dispatch **one reviewer subagent** — not the planne
 - `gpt-5.4-mini` when the bundle's plan frontmatter says `test_strategy: tdd`
 - `gpt-5.4` when `test_strategy: architectural`
 
-The reviewer gets the plan, the patches/diffs for every per-bug commit on the bundle branch, and the validation output. It returns one verdict per bug (`APPROVE` / `REJECT` with a one-sentence reason). The orchestrator writes `$STATE_DIR/reviews/<bundle>.json`.
+**The reviewer is blind.** It receives only:
+
+1. The bug claim JSON(s) in the bundle
+2. Per-commit diffs (`git log -p origin/main..bounty/<run_id>/<bundle>`) and the commit messages
+3. Project rules (`CLAUDE.md` / `AGENTS.md`)
+4. For any bug with a reproduced PoC, the `method` / `observed` / `expected_after_fix` fields from `$STATE_DIR/pocs/<BUG-ID>.json`
+
+And explicitly **not** the plan (`$STATE_DIR/plans/<bundle>.md`), the implementer's `$STATE_DIR/fixes/<BUG-ID>.json` summaries, or any natural-language explanation of what the bundle was supposed to do beyond the per-commit messages themselves. Rationale: a reviewer who reads the planner's "why" first will rationalize a weak diff; a blind reviewer judges whether the commit + test speaks for itself, which is the standard bounty wants to enforce.
+
+The reviewer returns one verdict per bug (`APPROVE` / `REJECT` with a one-sentence reason). The orchestrator writes `$STATE_DIR/reviews/<bundle>.json`.
 
 Process reviewers incrementally via `wait_agent`; the moment a bundle's review lands, resolve it and re-render the leaderboard.
 
@@ -592,6 +658,34 @@ Print a one-liner per group so the user sees the plan before any branch is pushe
 For each group: create `<slug>` off `origin/main`, cherry-pick the approved per-bug commits from their bundle branches preserving order, run aggregate validation. If validation fails, bisect, drop the offending commit, and record the drop in `pr-groups.json`. Never squash — the individual commits are the audit trail.
 
 Run a leak sweep (see Branch isolation contract) after all aggregates are built.
+
+### Step 5b.5: Pre-push secrets scan
+
+Skip when `--no-secrets-scan` is set. Default: on.
+
+Before pushing any aggregate branch, scan its `origin/main..HEAD` diff against the pattern list in `../../skills/bounty/references/secret-patterns.txt` (AWS keys, GitHub PATs, Slack tokens, private-key blocks, JWTs, and generic high-entropy assignments). The orchestrator reads the file at Phase 0 and snapshots its SHA-256 into `config.json` as `secret_patterns_sha256` so a mid-run edit to the pattern file doesn't change scan behavior for this run.
+
+A hit blocks **only that PR group** — other groups still ship if they're clean. Record the hit on `pr-groups.json` under the group's `blocked_by_secrets_scan` field:
+
+```json
+{
+  "slug": "bounty/<run_id>/pr-2-null-safety",
+  "status": "blocked",
+  "blocked_by_secrets_scan": [
+    {"commit": "a1b2c3d", "file": "tests/fixtures/config.php", "line": 17, "pattern": "aws-secret-key"}
+  ]
+}
+```
+
+**Never write the matched secret value anywhere** — only the pattern name, file, and line. `pr-groups.json` is sometimes attached to bug reports or shared in screenshots.
+
+Print a one-liner per blocked group:
+
+```
+🚫 PR 2/3  pr-2-null-safety  BLOCKED by secrets-scan  tests/fixtures/config.php:17 (aws-secret-key)
+```
+
+On a hit the underlying bug's finder is not penalized — the fix that leaked the secret was the implementer's work. The implementer's `+1` fix credit is reversed and the bug returns to the queue for one isolated per-bug retry. If the retry also hits the scan, abandon the bug and surface it in the final report.
 
 ### Step 5c: Push and open PRs
 
