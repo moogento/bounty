@@ -163,7 +163,15 @@ for path in $(git worktree list --porcelain | awk '/^worktree / {print $2}'); do
         ${BRANCH_FILTER}*) git worktree remove "$path" --force ;;
     esac
 done
-git worktree prune
+
+# Prune dangling worktree records — but in a scoped clean, skip it while another run's dir
+# is still present: a sibling run's just-registered worktree could momentarily look prunable.
+# In --all mode (RUN_ID empty) there is nothing to protect, so prune freely.
+if [ -z "$RUN_ID" ] || [ -z "$(find .temp/bounty -mindepth 1 -maxdepth 1 -type d ! -name "$RUN_ID" 2>/dev/null)" ]; then
+    git worktree prune
+else
+    echo "skip worktree prune: other bounty run dir(s) present"
+fi
 ```
 
 ## Step 5: Delete merged branches (in scope)

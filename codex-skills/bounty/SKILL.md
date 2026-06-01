@@ -120,6 +120,15 @@ State is per-run, under `.temp/bounty/<run_id>/`:
 
 ```bash
 STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
+
+# Atomically claim a fresh run dir. `mkdir` (no -p) fails if it already exists, so two
+# same-second, same-scope launches can't silently share one state dir + branch namespace.
+mkdir -p "$MAIN_REPO/.temp/bounty"
+BASE_RUN_ID="$RUN_ID"; suffix=1
+until mkdir "$STATE_DIR" 2>/dev/null; do
+    suffix=$((suffix + 1)); RUN_ID="${BASE_RUN_ID}-${suffix}"
+    STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
+done
 mkdir -p "$STATE_DIR"/{claims,votes,fixes,plans,reviews,pr-review}
 ln -snf "$RUN_ID" "$MAIN_REPO/.temp/bounty/latest"
 ```
