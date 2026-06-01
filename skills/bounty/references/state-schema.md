@@ -407,8 +407,10 @@ Both must be true. A partial match (one side only) surfaces as a debug log line 
 Every file write uses a temp-file + rename pattern so readers never see a half-written file:
 
 ```bash
-tmp=$(mktemp .temp/bounty/leaderboard.json.XXXX)
-jq '.' > "$tmp" && mv "$tmp" .temp/bounty/leaderboard.json
+tmp=$(mktemp "$STATE_DIR/leaderboard.json.XXXX")
+jq '.' > "$tmp" && mv "$tmp" "$STATE_DIR/leaderboard.json"
 ```
+
+Write the temp file under `$STATE_DIR` (never a bare `.temp/bounty/...`) so the `mv` is a same-directory atomic rename and the write stays inside this run's own state dir — a concurrent run's `$STATE_DIR` is a sibling and must never be touched.
 
 This matters because multiple agents in worktrees may write to the same state directory concurrently. The per-repo `.bounty/dismissed.yml` uses the same pattern when the orchestrator appends new entries.

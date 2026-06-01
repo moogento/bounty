@@ -57,7 +57,7 @@ SCOPE_SLUG=$(echo "${SCOPE:-repo}" | tr '/' '-' | tr -cd '[:alnum:]-' | sed 's/^
 RUN_ID="$(date -u +%Y%m%d-%H%M%S)-${SCOPE_SLUG}"
 ```
 
-Record `run_id` in `config.json`. Every branch created by this run MUST be named `bounty/<run_id>/<bundle>` and MUST be created via `git worktree add -b` — no branch without a worktree, ever (Phase 4 and Phase 5 use this; see the Branch isolation contract below).
+This is the run's initial `run_id`; the authoritative value is written to `config.json` once, in 0d (a fresh run may bump it there to dodge a same-second, same-scope collision). Every branch created by this run MUST be named `bounty/<run_id>/<bundle>` and MUST be created via `git worktree add -b` — no branch without a worktree, ever (Phase 4 and Phase 5 use this; see the Branch isolation contract below).
 
 ### 0b. Scan for existing runs
 
@@ -67,6 +67,7 @@ Scan for any in-progress runs (at least one `.temp/bounty/<id>/config.json` whos
 
 ```bash
 EXISTING_RUNS=$(find .temp/bounty -mindepth 2 -maxdepth 2 -name config.json 2>/dev/null)
+RESUMING=false   # set true below only when a resume branch adopts an existing run_id
 ```
 
 Branch on what's there:
@@ -81,6 +82,8 @@ Branch on what's there:
 | Nothing in-progress | Proceed |
 
 "Overlap" means the existing run's `scope` is a prefix of, or prefixed by, this run's scope. Non-overlapping scopes (e.g. one run on `app/Foo`, another on `app/Bar`) are always safe to run alongside without prompting.
+
+Whenever a resume branch above is taken (any `--resume` row or an interactive `resume-<id>` choice), adopt that run's `run_id` as `RUN_ID` **and set `RESUMING=true`**. Every fresh-run path (`--fresh`, `proceed-alongside`, nothing-in-progress) leaves `RESUMING=false`. 0d reads this flag to decide whether to claim a new state dir or reuse the resumed one — without it, a resume would land in a freshly-bumped empty dir.
 
 Do **not** write into another run's state directory. The per-run layout makes this physically impossible as long as every orchestrator write goes through `$STATE_DIR`.
 
@@ -108,6 +111,18 @@ State is per-run, under `.temp/bounty/<run_id>/`:
 
 ```bash
 STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
+mkdir -p "$MAIN_REPO/.temp/bounty"
+
+# A resumed run (RESUMING=true, set in 0b) keeps its adopted id and dir — reuse as-is.
+# A fresh run claims its dir atomically: `mkdir` (no -p) fails if it already exists, so two
+# same-second, same-scope launches can't silently share one state dir + branch namespace.
+if [ "${RESUMING:-false}" != "true" ]; then
+    BASE_RUN_ID="$RUN_ID"; suffix=0
+    until mkdir "$STATE_DIR" 2>/dev/null; do
+        suffix=$((suffix + 1)); RUN_ID="${BASE_RUN_ID}-${suffix}"
+        STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
+    done
+fi
 mkdir -p "$STATE_DIR"/{claims,votes,fixes,plans,reviews,pr-review}
 ```
 
