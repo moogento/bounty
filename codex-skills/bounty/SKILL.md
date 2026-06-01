@@ -78,7 +78,7 @@ SCOPE_SLUG=$(echo "${SCOPE:-repo}" | tr '/' '-' | tr -cd '[:alnum:]-' | sed 's/^
 RUN_ID="$(date -u +%Y%m%d-%H%M%S)-${SCOPE_SLUG}"
 ```
 
-Record `run_id` in `config.json`. Every branch MUST be named `bounty/<run_id>/<bundle>` and MUST be created via `git worktree add -b` — no branch without a worktree (see Branch isolation contract). Two concurrent bounty runs in the same repo scope to different run ids and therefore different branches.
+This is the run's initial `run_id`; the authoritative value is written to `config.json` once, in 0d (a fresh run may bump it there to dodge a same-second, same-scope collision). Every branch MUST be named `bounty/<run_id>/<bundle>` and MUST be created via `git worktree add -b` — no branch without a worktree (see Branch isolation contract). Two concurrent bounty runs in the same repo scope to different run ids and therefore different branches.
 
 ### 0b. Scan for existing runs
 
@@ -95,6 +95,8 @@ Scan for any in-progress runs (`.temp/bounty/<id>/config.json` with `last_comple
 | Nothing in-progress | Proceed |
 
 "Overlap" means one scope is a prefix of the other. Non-overlapping scopes run alongside each other silently.
+
+Whenever a resume branch above is taken (any `--resume` row or an interactive `resume-<id>` choice), adopt that run's `run_id` as `RUN_ID` **and set `RESUMING=true`**; every fresh-run path leaves it `false` (the default). 0d reads this flag to decide whether to claim a new state dir or reuse the resumed one — without it, a resume would land in a freshly-bumped empty dir.
 
 Never write into another run's state directory. The per-run layout makes this physically impossible as long as every write goes through `$STATE_DIR`.
 
@@ -120,15 +122,18 @@ State is per-run, under `.temp/bounty/<run_id>/`:
 
 ```bash
 STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
-
-# Atomically claim a fresh run dir. `mkdir` (no -p) fails if it already exists, so two
-# same-second, same-scope launches can't silently share one state dir + branch namespace.
 mkdir -p "$MAIN_REPO/.temp/bounty"
-BASE_RUN_ID="$RUN_ID"; suffix=1
-until mkdir "$STATE_DIR" 2>/dev/null; do
-    suffix=$((suffix + 1)); RUN_ID="${BASE_RUN_ID}-${suffix}"
-    STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
-done
+
+# A resumed run (RESUMING=true, set in 0b) keeps its adopted id and dir — reuse as-is.
+# A fresh run claims its dir atomically: `mkdir` (no -p) fails if it already exists, so two
+# same-second, same-scope launches can't silently share one state dir + branch namespace.
+if [ "${RESUMING:-false}" != "true" ]; then
+    BASE_RUN_ID="$RUN_ID"; suffix=0
+    until mkdir "$STATE_DIR" 2>/dev/null; do
+        suffix=$((suffix + 1)); RUN_ID="${BASE_RUN_ID}-${suffix}"
+        STATE_DIR="$MAIN_REPO/.temp/bounty/$RUN_ID"
+    done
+fi
 mkdir -p "$STATE_DIR"/{claims,votes,fixes,plans,reviews,pr-review}
 ln -snf "$RUN_ID" "$MAIN_REPO/.temp/bounty/latest"
 ```
