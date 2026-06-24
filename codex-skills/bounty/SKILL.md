@@ -38,10 +38,10 @@ Parse the user request for these optional flags or settings:
 | `--voting-mode <mode>` | `auto` | `full` = N−1 voters per claim. `panel` = 1 voter per specialty reviews every non-own claim. `auto` = `full` when claims ≤ 20, else `panel` |
 | `--max-fixes N` | 10 | If confirmed count exceeds, Phase 4 pauses for user to confirm/curate the bundle plan |
 | `--max-bundles N` | 6 | Cap on Phase-4 bundles |
-| `--model-hunt <model>` | `gpt-5.5-mini` | Preferred model for recon and hunting |
+| `--model-hunt <model>` | `gpt-5.5` | Preferred model for recon and hunting |
 | `--model-vote <model>` | `gpt-5.5-mini` | Preferred model for voting; falls back to `--model-hunt` if it rate-limits |
 | `--model-plan <model>` | `gpt-5.5` | Preferred model for bundle planners |
-| `--model-fix <model>` | `gpt-5.5-mini` | Preferred model for bundle implementers |
+| `--model-fix <model>` | `gpt-5.5` | Preferred model for bundle implementers |
 | `--max-bugs-per-pr N` | 10 | Phase-5 splits into an additional PR when a group would exceed this bug count |
 | `--max-lines-per-pr N` | 400 | Phase-5 splits into an additional PR when a group's added+removed line count would exceed this |
 | `--pr-review-rounds N` | 2 | Step 5e polls each opened PR for automated-review comments, validates them, fixes valid ones, and (when replies are on) replies with rationale to invalid ones, up to N rounds per PR |
@@ -393,7 +393,7 @@ Rules that apply to every phase below:
 Spawn one bounded recon subagent. Prefer:
 
 - `agent_type: "explorer"`
-- model `gpt-5.5-mini` or the user-provided hunt model
+- model `gpt-5.5` or the user-provided hunt model
 
 Its job:
 
@@ -420,7 +420,7 @@ Collisions between hunters on the same lens are the validation signal. Record th
 Dispatch the hunters in parallel as read-heavy subagents. Prefer:
 
 - `agent_type: "explorer"`
-- model `gpt-5.5-mini` or the configured hunt model (all seeds on the same tier; second/third hunters exist to cross-check cheaply, not to deepen)
+- model `gpt-5.5` or the configured hunt model (all seeds on the same tier; second/third hunters exist to cross-check cheaply, not to deepen)
 
 Each hunter receives:
 
@@ -647,7 +647,7 @@ Process planners incrementally via `wait_agent` so each plan becomes available a
 After all plans are written, dispatch **one implementer subagent per bundle**:
 
 - `agent_type: "worker"`
-- model `gpt-5.5-mini` or the configured fix model
+- model `gpt-5.5` or the configured fix model
 - each gets its bundle's plan (verbatim), the claim JSONs, the recon report, and project validation commands
 
 Each implementer must walk `commit_order` one bug at a time:
