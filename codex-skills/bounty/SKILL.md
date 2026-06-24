@@ -39,7 +39,7 @@ Parse the user request for these optional flags or settings:
 | `--max-fixes N` | 10 | If confirmed count exceeds, Phase 4 pauses for user to confirm/curate the bundle plan |
 | `--max-bundles N` | 6 | Cap on Phase-4 bundles |
 | `--model-hunt <model>` | `gpt-5.5` | Preferred model for recon and hunting |
-| `--model-vote <model>` | `gpt-5.5-mini` | Preferred model for voting; falls back to `--model-hunt` if it rate-limits |
+| `--model-vote <model>` | `gpt-5.4-mini` | Preferred model for voting; falls back to `--model-hunt` if it rate-limits |
 | `--model-plan <model>` | `gpt-5.5` | Preferred model for bundle planners |
 | `--model-fix <model>` | `gpt-5.5` | Preferred model for bundle implementers |
 | `--max-bugs-per-pr N` | 10 | Phase-5 splits into an additional PR when a group would exceed this bug count |
@@ -379,7 +379,7 @@ Rules that apply to every phase below:
    - Collision: `🛡️ Security/2 collided with 🛡️ Security/1 on BUG-003  (collision_count = 2)`
    - New vote: `BUG-003  ✓ VALID  from 🧵 Concurrency  (sanitizer bypassed upstream)`
    - Claim resolved: `BUG-003 CONFIRMED (4 VALID / 1 FP / 2 abstain)  finder +1 → 🛡️ Security`
-   - Bundle planned: `📦 fix-acl  3 bugs  test_strategy=tdd  reviewer=gpt-5.5-mini`
+   - Bundle planned: `📦 fix-acl  3 bugs  test_strategy=tdd  reviewer=gpt-5.4-mini`
    - Plan written: `📋 plans/fix-acl.md written  3 bugs  commit_order=[…]`
    - Fix committed: `BUG-003 (fix-acl) committed  (2 files, test added, phpunit ✓)`
    - Bundle reviewed: `fix-acl  3/3 APPROVE from 🧵  → kept, implementer +3`
@@ -512,7 +512,7 @@ Each voter receives:
 Prefer smaller, cheaper subagents for voting:
 
 - `agent_type: "explorer"`
-- model `$MODEL_VOTE` (default `gpt-5.5-mini`)
+- model `$MODEL_VOTE` (default `gpt-5.4-mini`)
 
 ### Live progress during voting
 
@@ -669,7 +669,7 @@ The orchestrator owns integration:
 
 For each completed bundle, dispatch **one reviewer subagent** — not the planner or implementer of that bundle, and not a bug's original finder when avoidable:
 
-- `gpt-5.5-mini` when the bundle's plan frontmatter says `test_strategy: tdd`
+- `gpt-5.4-mini` when the bundle's plan frontmatter says `test_strategy: tdd`
 - `gpt-5.5` when `test_strategy: architectural`
 
 **The reviewer is blind.** It receives only:
