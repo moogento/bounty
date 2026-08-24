@@ -27,7 +27,7 @@ Parse `$ARGUMENTS` for these flags (all optional):
 | `--voting-mode <mode>` | `auto` | `full` = N−1 voters per claim (small runs). `panel` = 1 voter per specialty reviews every non-own claim (8 agents total, independent of claim count). `auto` = `full` when claims ≤ 20, `panel` otherwise |
 | `--max-fixes N` | 10 | If confirmed count exceeds this, Phase 4 pauses and asks the user to confirm/curate/reject the bundle plan before dispatching planners |
 | `--model-hunt <tier>` | `sonnet` | Model tier for hunters |
-| `--model-vote <tier>` | `haiku` | Model tier for voters; orchestrator auto-falls back to `sonnet` on haiku rate-limit errors (announced) |
+| `--model-vote <tier>` | `haiku` | Model tier for voters; orchestrator auto-falls back to `sonnet` on haiku rate-limit errors (announced). For runs dominated by subtle correctness claims (concurrency, state-machine, timezone, idempotency, data-integrity), `sonnet` is the more reliable adjudication tier — haiku can rubber-stamp claims that need real code comprehension |
 | `--model-plan <tier>` | `opus` | Model tier for bundle planners |
 | `--model-fix <tier>` | `sonnet` | Model tier for bundle implementers |
 | `--max-bundles N` | 6 | Cap on Phase-4 bundles. Smallest lenses merge into a `misc` bundle when exceeded |
@@ -630,6 +630,8 @@ Resolve the mode from `--voting-mode` and print:
 ```
 Voting mode: panel (33 claims > 20 threshold — dispatching 8 voters)
 ```
+
+When the surviving claims are mostly subtle correctness bugs (concurrency, state-machine, timezone, idempotency) rather than shallow pattern matches, prefer `--model-vote sonnet` — or the orchestrator may upgrade the panel to sonnet — since a too-weak voter tier produces false CONFIRMs/rubber-stamps on claims that need real code comprehension to adjudicate. Keep haiku for high-volume shallow-pattern runs where cost matters.
 
 ### Panel-mode dispatch
 
