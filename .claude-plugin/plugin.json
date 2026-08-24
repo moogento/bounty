@@ -1,6 +1,6 @@
 {
   "name": "bounty",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Competitive multi-agent bug bounty — agents hunt, vote, fix, and earn points",
   "author": {
     "name": "Moogento",

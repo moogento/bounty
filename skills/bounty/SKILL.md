@@ -42,6 +42,8 @@ Parse `$ARGUMENTS` for these flags (all optional):
 | `--fresh` | false | At Phase 0, proceed alongside any existing `.temp/bounty/<id>/` dirs without prompting (each run uses its own state dir) |
 | `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
+**Model tiers.** The `--model-*` defaults are the generation-agnostic aliases `haiku` / `sonnet` / `opus`, which resolve to the current Claude generation (Haiku 4.5, Sonnet 5, Opus 5). Keep the aliases rather than pinning dated model ids so the run tracks the latest generation automatically. Do **not** dispatch bounty workers on `fable`: it resolves to the session's own flagship model and burns the interactive session's usage budget for background fan-out work that the cheaper tiers handle. Pass an explicit tier for every worker; never let a worker inherit the orchestrator's session model.
+
 If no scope is given, ask the user once whether to scope the hunt.
 
 ## Phase 0: Initialize state
@@ -452,7 +454,7 @@ The orchestrator must surface progress **as events happen**, not just at phase b
 
 Rules that apply to every phase below:
 
-1. **Tail state directories while agents run.** Hunters, voters, and fixers all write files as their source of truth. Between dispatch and final `TaskList` wait, run short polling Bash calls (≈20–30s apart, max ~20 iterations per phase) that list new files and print a one-liner per file.
+1. **Tail state directories while agents run.** Hunters, voters, and fixers all write files as their source of truth. Between dispatch and the agents' completion notifications, run short polling Bash calls (≈20–30s apart, max ~20 iterations per phase) that list new files and print a one-liner per file.
 2. **Print a one-liner per event as it lands.** Use compact, scannable formats:
    - New claim: `🛡️ Security/1 → BUG-003  high  sql-injection  app/Http/Orders.php:142`
    - Collision: `🛡️ Security/2 collided with 🛡️ Security/1 on BUG-003  (collision_count = 2)`
@@ -464,7 +466,7 @@ Rules that apply to every phase below:
    - Bundle reviewed: `fix-acl  3/3 APPROVE from 🧵  → kept, implementer +3`
 3. **Re-render the running leaderboard on every state change AND at the start of every phase.** Triggers: new confirmation, new FP, new fix-approval, *and* the first message of each Phase 1–6 (even when nothing has scored yet). A long silent hunt phase is exactly when the user most needs to see the table. Use the exact format from Phase 0e — header, box-drawing characters, totals row — prefixed `🏆 BOUNTY CHAMPIONSHIP — standings @ phase N (run <RUN_ID>)`. Never substitute a text summary ("current scores: security 2, concurrency 1…") for the table; the table is the contract. **Also never substitute a `Write(leaderboard.json)` tool-preview for the table** — the JSON preview is implementation noise, the ASCII table is the scoreboard. Always emit the table as assistant stdout text right after any `leaderboard.json` update, so the table is the last thing the user sees before the next tool call. **Render Clawd (0f) above the table** with the frame matching the most recent event (confirmation, FP, fix-approved, lead-change, or the quiet-tick frame when the re-render was triggered by a phase boundary with no scoring change). Lead-change detection: diff the `#1` row against the previous re-render — a new specialist on top gets the crown frame.
 4. **Never batch.** If three claims land during one poll tick, print three lines — do not summarize as "3 new claims."
-5. Keep the poll loop bounded: exit as soon as `TaskList` shows all dispatched agents in that phase complete, or after the iteration cap (then fall through to the phase's final wait).
+5. Keep the poll loop bounded: exit as soon as every dispatched agent in that phase has reported completion (each background agent sends a task-completion notification when it finishes), or after the iteration cap (then fall through to the phase's final wait).
 
 ## Phase 1: Shared recon
 
@@ -530,12 +532,12 @@ Each prompt must include:
 
 ### Live tailing while hunters run
 
-Do not simply block on `TaskList`. Instead, alternate short poll cycles until all hunters complete:
+Do not simply wait idle for the hunters' completion notifications. Instead, alternate short poll cycles until all hunters complete:
 
 1. Track a set of claim filenames already printed.
 2. Every ~25s run a Bash call like `ls -t "$STATE_DIR"/claims/*.json 2>/dev/null` and diff against the printed set.
 3. For each new file, read it and print the **new-claim one-liner** from the Live progress rules. Also print a compact running count: `claims so far: 🛡️ 3 · 🧵 2 · ⚡ 1 · … (total 6)`.
-4. Call `TaskList` at the end of each cycle; when every hunter is `completed`, break.
+4. At the end of each cycle, check which hunters have sent their completion notification; when every hunter has completed, break.
 
 Then read the claims directory in full and proceed.
 
@@ -859,7 +861,7 @@ Each planner prompt includes:
   - One section per bug: proposed minimal fix, test stance (failing test that gets added, or why TDD won't work), and any dependencies on other bugs in the bundle
   - **No code changes.** Planning only. Read-only worktree contract: if the planner edits any file, its plan is rejected and the bundle falls back to per-bug fixing.
 
-Poll `$STATE_DIR/plans/` for new files between dispatch and the final `TaskList` wait; print a plan-written one-liner when each lands:
+Poll `$STATE_DIR/plans/` for new files between dispatch and the planners' completion notifications; print a plan-written one-liner when each lands:
 
 ```
 📋 plans/fix-acl.md written  test_strategy=tdd  3 bugs  reviewer=haiku
