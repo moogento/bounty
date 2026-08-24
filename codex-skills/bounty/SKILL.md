@@ -39,7 +39,7 @@ Parse the user request for these optional flags or settings:
 | `--max-fixes N` | 10 | If confirmed count exceeds, Phase 4 pauses for user to confirm/curate the bundle plan |
 | `--max-bundles N` | 6 | Cap on Phase-4 bundles |
 | `--model-hunt <model>` | `gpt-5.5` | Preferred model for recon and hunting |
-| `--model-vote <model>` | `gpt-5.4-mini` | Preferred model for voting; falls back to `--model-hunt` if it rate-limits |
+| `--model-vote <model>` | `gpt-5.4-mini` | Preferred model for voting; falls back to `--model-hunt` if it rate-limits. For runs dominated by subtle correctness claims (concurrency, state-machine, timezone, idempotency, data-integrity), prefer a fuller model like `gpt-5.5` — `gpt-5.4-mini` can rubber-stamp claims that need real code comprehension |
 | `--model-plan <model>` | `gpt-5.5` | Preferred model for bundle planners |
 | `--model-fix <model>` | `gpt-5.5` | Preferred model for bundle implementers |
 | `--max-bugs-per-pr N` | 10 | Phase-5 splits into an additional PR when a group would exceed this bug count |
@@ -494,6 +494,8 @@ Resolve the voting mode from `--voting-mode` first. Announce it at phase start:
 - `auto` (default) — resolve at runtime based on claim count.
 
 If the voter-tier model rate-limits, announce once and fall back to `$MODEL_HUNT` for voting; persist the fallback in `config.json` as `model_vote_effective`.
+
+When the surviving claims are mostly subtle correctness bugs (concurrency, state-machine, timezone, idempotency) rather than shallow pattern matches, prefer `--model-vote gpt-5.5` — or the orchestrator may upgrade the panel to the fuller model — since a too-weak voter model produces false CONFIRMs/rubber-stamps on claims that need real code comprehension to adjudicate. Keep `gpt-5.4-mini` for high-volume shallow-pattern runs where cost matters.
 
 ### Full-mode voting
 
