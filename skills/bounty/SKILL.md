@@ -42,7 +42,7 @@ Parse `$ARGUMENTS` for these flags (all optional):
 | `--fresh` | false | At Phase 0, proceed alongside any existing `.temp/bounty/<id>/` dirs without prompting (each run uses its own state dir) |
 | `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
-**Model tiers.** The `--model-*` defaults are the generation-agnostic aliases `haiku` / `sonnet` / `opus`, which resolve to the current Claude generation (Haiku 4.5, Sonnet 5, Opus 5). Keep the aliases rather than pinning dated model ids so the run tracks the latest generation automatically. Do **not** dispatch bounty workers on `fable`: it resolves to the session's own flagship model and burns the interactive session's usage budget for background fan-out work that the cheaper tiers handle. Pass an explicit tier for every worker; never let a worker inherit the orchestrator's session model.
+**Model tiers.** The `--model-*` defaults are the generation-agnostic aliases `haiku` / `sonnet` / `opus`, which resolve to the current Claude generation (today Opus 5.5, Sonnet 5.5, Haiku 5.5; the newest release of each). Keep the aliases rather than pinning dated model ids so the run tracks the latest generation automatically. Do **not** dispatch bounty workers on `fable`: it resolves to the session's own flagship model and burns the interactive session's usage budget for background fan-out work that the cheaper tiers handle. Pass an explicit tier for every worker; never let a worker inherit the orchestrator's session model.
 
 If no scope is given, ask the user once whether to scope the hunt.
 
@@ -470,7 +470,7 @@ Rules that apply to every phase below:
 
 ## Phase 1: Shared recon
 
-Spawn **1 recon agent** in an isolated worktree (`isolation: "worktree"`, `model: "sonnet"`, `run_in_background: false`). Its job: produce a shared briefing that every hunter receives as cached context.
+Spawn **1 recon agent** in an isolated worktree (`isolation: "worktree"`, `model: "sonnet", effort: "medium"`, `run_in_background: false`). Its job: produce a shared briefing that every hunter receives as cached context.
 
 **Scale the time budget by scope size**:
 
@@ -508,7 +508,7 @@ Collisions between hunters on the same lens are the *point* — two independent 
 **Dispatch all N×K hunters in a single message**, each with:
 - `isolation: "worktree"`
 - `name: "hunter-<lens>-<seed>"` (so they are addressable later; seed defaults to `1` when K=1)
-- `model: "sonnet"` (or `$MODEL_HUNT`) — **all** hunters run at the hunt tier regardless of seed index, since the second and third hunters exist to cheaply cross-check, not to duplicate at a higher tier
+- `model: "sonnet", effort: "medium"` (or `$MODEL_HUNT`): **all** hunters run at the hunt tier regardless of seed index, since the second and third hunters exist to cheaply cross-check, not to duplicate at a higher tier
 - `run_in_background: true`
 - `subagent_type: "general-purpose"` (unless a specialist subagent fits — e.g. `moo-security-reviewer` for the security lens)
 
@@ -725,7 +725,7 @@ The orchestrator enforces the contract: after a PoC agent returns, it runs `git 
 For each eligible CONFIRMED claim:
 
 - `isolation: "worktree"` — one read-only worktree per PoC, off `origin/main`
-- `model: "sonnet"` (same tier as the hunt — the PoC is a specialized re-read, not a code-write)
+- `model: "sonnet", effort: "medium"` (same tier as the hunt, since the PoC is a specialized re-read, not a code-write)
 - `name: "poc-<BUG-ID>"`
 - `run_in_background: true`
 - prompt receives: the full claim JSON, the cited file + ±20 lines of context, the recon report, the repo's run/validation commands (from `CLAUDE.md` / `AGENTS.md`), `$POC_DIR`, `$STATE_DIR`, and the hard-rules block above verbatim
@@ -842,7 +842,7 @@ The `tdd?`/`architectural?` marker is a *guess* used only to prepare the reviewe
 
 Dispatch all planners in a single message:
 - `isolation: "worktree"` — planners only **read**, but worktree isolation keeps their read state consistent
-- `model: "opus"` (or `$MODEL_PLAN`)
+- `model: "opus", effort: "medium"` (or `$MODEL_PLAN`)
 - `name: "planner-<bundle>"`
 - `run_in_background: true`
 
@@ -873,7 +873,7 @@ Poll `$STATE_DIR/plans/` for new files between dispatch and the planners' comple
 
 After all plans are written, dispatch implementers in a single message:
 - `isolation: "worktree"` — one worktree per bundle, branch `bounty/<run_id>/<bundle>` off `origin/main` (not the user's local `main` — `origin/main` is the canonical base so a stale local `main` does not contaminate the bundle)
-- `model: "sonnet"` (or `$MODEL_FIX`)
+- `model: "sonnet", effort: "medium"` (or `$MODEL_FIX`)
 - `name: "implementer-<bundle>"`
 - `run_in_background: true`
 
@@ -895,8 +895,8 @@ Tail `$STATE_DIR/fixes/` on the same ~30s cycle and print the fix-committed one-
 ### Step 4d: Bundle review (1 reviewer per bundle)
 
 After an implementer finishes its bundle, dispatch **1 reviewer**:
-- `model: "haiku"` when the plan's frontmatter says `test_strategy: tdd` (the passing tests are most of the evidence)
-- `model: "sonnet"` when `test_strategy: architectural` (review needs judgment)
+- `model: "haiku", effort: "high"` when the plan's frontmatter says `test_strategy: tdd` (the passing tests are most of the evidence)
+- `model: "sonnet", effort: "medium"` when `test_strategy: architectural` (review needs judgment)
 - `name: "reviewer-<bundle>"`
 - `isolation: "worktree"` (checks out `bounty/<run_id>/<bundle>`)
 - Reviewer may not be the planner or implementer of this bundle. Prefer a specialist whose lens is adjacent but not represented among the bundle's original finders.

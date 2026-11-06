@@ -3,6 +3,7 @@ description: Merge open PRs from a bounty run and clean up its worktrees, branch
 argument-hint: "[--run-id <id>] [--all] [--keep-state] [--no-merge]"
 allowed-tools: Bash(git:*), Bash(gh:*), Bash(rm:*), Bash(ls:*), Bash(find:*), Bash(jq:*), Bash(readlink:*), Read
 model: haiku
+effort: high
 ---
 
 # Bounty Cleanup
