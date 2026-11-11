@@ -42,6 +42,11 @@ Parse the user request for these optional flags or settings:
 | `--model-vote <model>` | `gpt-6-luna` (medium) | Preferred model for voting; falls back to `--model-hunt` if it rate-limits. For runs dominated by subtle correctness claims (concurrency, state-machine, timezone, idempotency, data-integrity), prefer a fuller model like `gpt-6.1-sol`, since `gpt-6-luna` can rubber-stamp claims that need real code comprehension |
 | `--model-plan <model>` | `gpt-6.1-sol` (medium) | Preferred model for bundle planners |
 | `--model-fix <model>` | `gpt-6.1-sol` (medium) | Preferred model for bundle implementers |
+| `--effort-hunt <level>` | `medium` | Reasoning effort for recon, hunters and PoC agents |
+| `--effort-vote <level>` | `medium` | Reasoning effort for voters, including the fallback |
+| `--effort-plan <level>` | `medium` | Reasoning effort for bundle planners |
+| `--effort-fix <level>` | `medium` | Reasoning effort for bundle implementers and per-bug retries |
+| `--effort-review <level>` | `medium` | Reasoning effort for bundle reviewers |
 | `--max-bugs-per-pr N` | 10 | Phase-5 splits into an additional PR when a group would exceed this bug count |
 | `--max-lines-per-pr N` | 400 | Phase-5 splits into an additional PR when a group's added+removed line count would exceed this |
 | `--pr-review-rounds N` | 2 | Step 5e polls each opened PR for automated-review comments, validates them, fixes valid ones, and (when replies are on) replies with rationale to invalid ones, up to N rounds per PR |
@@ -53,7 +58,7 @@ Parse the user request for these optional flags or settings:
 | `--fresh` | false | At Phase 0, proceed alongside any existing `.temp/bounty/<id>/` dirs without prompting (each run uses its own state dir) |
 | `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
-**Effort defaults.** Every subagent dispatch passes both the model and a reasoning effort: hunt, plan and fix `gpt-6.1-sol` at `medium`; vote `gpt-6-luna` at `medium`; subtle-correctness votes `gpt-6.1-sol` at `medium`. Raise effort only after a failed run; never omit the effort.
+**Effort defaults.** Every subagent dispatch passes both the model and a reasoning effort, taken from the matching `--effort-*` flag (`low`, `medium`, `high` or `xhigh`; default `medium` for every phase). Persist the resolved values in `config.json` as `effort_hunt`, `effort_vote`, `effort_plan`, `effort_fix` and `effort_review`. Raise effort only after a failed run; never omit the effort.
 
 If no scope is given, ask once whether to hunt the whole repo or a narrower module.
 
@@ -395,7 +400,7 @@ Rules that apply to every phase below:
 Spawn one bounded recon subagent. Prefer:
 
 - `agent_type: "explorer"`
-- model `gpt-6.1-sol` or the user-provided hunt model, reasoning effort `medium`
+- model `$MODEL_HUNT` (default `gpt-6.1-sol`), reasoning effort `$EFFORT_HUNT` (default `medium`)
 
 Its job:
 
@@ -422,7 +427,7 @@ Collisions between hunters on the same lens are the validation signal. Record th
 Dispatch the hunters in parallel as read-heavy subagents. Prefer:
 
 - `agent_type: "explorer"`
-- model `gpt-6.1-sol` or the configured hunt model, reasoning effort `medium` (all seeds on the same tier; second/third hunters exist to cross-check cheaply, not to deepen)
+- model `$MODEL_HUNT` (default `gpt-6.1-sol`), reasoning effort `$EFFORT_HUNT` (default `medium`) (all seeds on the same tier; second/third hunters exist to cross-check cheaply, not to deepen)
 
 Each hunter receives:
 
@@ -495,7 +500,7 @@ Resolve the voting mode from `--voting-mode` first. Announce it at phase start:
 - `panel` — dispatch one voter subagent per specialty; each reviews every claim not authored by its own lens and returns verdicts for all of them in a single structured return. The orchestrator serializes each voter's return into `$STATE_DIR/votes/VOTER-<lens>.jsonl` (one line per verdict). Use when `surviving_claims > 20`.
 - `auto` (default) — resolve at runtime based on claim count.
 
-If the voter-tier model rate-limits, announce once and fall back to `$MODEL_HUNT` for voting; persist the fallback in `config.json` as `model_vote_effective`.
+If the voter-tier model rate-limits, announce once and fall back to `$MODEL_HUNT` at `$EFFORT_VOTE` for voting; persist the fallback in `config.json` as `model_vote_effective`.
 
 When the surviving claims are mostly subtle correctness bugs (concurrency, state-machine, timezone, idempotency) rather than shallow pattern matches, prefer `--model-vote gpt-6.1-sol` at effort `medium` (or the orchestrator may upgrade the panel to the fuller model), since a too-weak voter model produces false CONFIRMs/rubber-stamps on claims that need real code comprehension to adjudicate. Keep `gpt-6-luna` for high-volume shallow-pattern runs where cost matters.
 
@@ -516,7 +521,7 @@ Each voter receives:
 Prefer smaller, cheaper subagents for voting:
 
 - `agent_type: "explorer"`
-- model `$MODEL_VOTE` (default `gpt-6-luna`), reasoning effort `medium`
+- model `$MODEL_VOTE` (default `gpt-6-luna`), reasoning effort `$EFFORT_VOTE` (default `medium`)
 
 ### Live progress during voting
 
@@ -560,7 +565,7 @@ After the PoC returns, the orchestrator runs `git -C <worktree> status --porcela
 
 ### Dispatch
 
-For each eligible CONFIRMED claim, spawn one read-only worktree subagent (`agent_type: "worker"`, model `$MODEL_HUNT` at reasoning effort `medium`). Run all eligible PoCs in parallel, batched in groups of 8, with a 10-minute wall-time cap per PoC. Each agent's prompt includes the claim JSON, the cited file ± 20 lines of context, the recon report, the repo's run/validation commands, `$POC_DIR`, `$STATE_DIR`, and the contract block above verbatim.
+For each eligible CONFIRMED claim, spawn one read-only worktree subagent (`agent_type: "worker"`, model `$MODEL_HUNT` at reasoning effort `$EFFORT_HUNT`). Run all eligible PoCs in parallel, batched in groups of 8, with a 10-minute wall-time cap per PoC. Each agent's prompt includes the claim JSON, the cited file ± 20 lines of context, the recon report, the repo's run/validation commands, `$POC_DIR`, `$STATE_DIR`, and the contract block above verbatim.
 
 ### Output contract
 
@@ -620,7 +625,7 @@ Cluster fixable bugs and write `$STATE_DIR/bundles.json`. Default heuristic:
 Dispatch **one planner subagent per bundle** in parallel:
 
 - `agent_type: "worker"`
-- model `gpt-6.1-sol` or the configured plan model, reasoning effort `medium`
+- model `$MODEL_PLAN` (default `gpt-6.1-sol`), reasoning effort `$EFFORT_PLAN` (default `medium`)
 
 Each planner gets the bundle name, every bug claim in the bundle, the recon report, and repo contribution rules.
 
@@ -651,7 +656,7 @@ Process planners incrementally via `wait_agent` so each plan becomes available a
 After all plans are written, dispatch **one implementer subagent per bundle**:
 
 - `agent_type: "worker"`
-- model `gpt-6.1-sol` or the configured fix model, reasoning effort `medium`
+- model `$MODEL_FIX` (default `gpt-6.1-sol`), reasoning effort `$EFFORT_FIX` (default `medium`)
 - each gets its bundle's plan (verbatim), the claim JSONs, the recon report, and project validation commands
 
 Each implementer must walk `commit_order` one bug at a time:
@@ -673,8 +678,8 @@ The orchestrator owns integration:
 
 For each completed bundle, dispatch **one reviewer subagent** — not the planner or implementer of that bundle, and not a bug's original finder when avoidable:
 
-- `gpt-6-luna` (effort `medium`) when the bundle's plan frontmatter says `test_strategy: tdd`
-- `gpt-6.1-sol` (effort `medium`) when `test_strategy: architectural`
+- `gpt-6-luna` (effort `$EFFORT_REVIEW`, default `medium`) when the bundle's plan frontmatter says `test_strategy: tdd`
+- `gpt-6.1-sol` (effort `$EFFORT_REVIEW`, default `medium`) when `test_strategy: architectural`
 
 **The reviewer is blind.** It receives only:
 
@@ -692,7 +697,7 @@ Process reviewers incrementally via `wait_agent`; the moment a bundle's review l
 Resolution per bug:
 
 - `APPROVE`: keep the commit; implementer gets `+1`
-- `REJECT`: revert that single commit on the bundle branch; the bug goes back to the queue for one isolated per-bug retry (`gpt-6.1-sol`, effort `medium`), then abandoned if it rejects again
+- `REJECT`: revert that single commit on the bundle branch; the bug goes back to the queue for one isolated per-bug retry (`gpt-6.1-sol`, effort `$EFFORT_FIX`), then abandoned if it rejects again
 
 After review, ship approved commits across **multiple PRs** — never one mega-PR. A single PR with 30+ bugs and 1,500+ changed lines is unreviewable.
 

@@ -30,6 +30,11 @@ Parse `$ARGUMENTS` for these flags (all optional):
 | `--model-vote <tier>` | `haiku` | Model tier for voters; orchestrator auto-falls back to `sonnet` on haiku rate-limit errors (announced). For runs dominated by subtle correctness claims (concurrency, state-machine, timezone, idempotency, data-integrity), `sonnet` is the more reliable adjudication tier — haiku can rubber-stamp claims that need real code comprehension |
 | `--model-plan <tier>` | `opus` | Model tier for bundle planners |
 | `--model-fix <tier>` | `sonnet` | Model tier for bundle implementers |
+| `--effort-hunt <level>` | `medium` | Effort for recon, hunters and PoC agents |
+| `--effort-vote <level>` | `medium` | Effort for voters, including the sonnet fallback |
+| `--effort-plan <level>` | `medium` | Effort for bundle planners |
+| `--effort-fix <level>` | `medium` | Effort for bundle implementers and per-bug retries |
+| `--effort-review <level>` | by strategy | Effort for bundle reviewers. Unset: `high` for `tdd` (haiku), `medium` for `architectural` (sonnet) |
 | `--max-bundles N` | 6 | Cap on Phase-4 bundles. Smallest lenses merge into a `misc` bundle when exceeded |
 | `--max-bugs-per-pr N` | 10 | Phase-5 splits into an additional PR when a group would exceed this bug count |
 | `--max-lines-per-pr N` | 400 | Phase-5 splits into an additional PR when a group's added+removed line count would exceed this |
@@ -43,6 +48,8 @@ Parse `$ARGUMENTS` for these flags (all optional):
 | `--resume <id>` | — | At Phase 0, reuse an existing `.temp/bounty/<id>/` state dir and continue from its last completed phase. `--resume` with no id resumes the sole in-progress run when there is exactly one |
 
 **Model tiers.** The `--model-*` defaults are the generation-agnostic aliases `haiku` / `sonnet` / `opus`, which resolve to the current Claude generation (today Opus 5.5, Sonnet 5.5, Haiku 5.5; the newest release of each). Keep the aliases rather than pinning dated model ids so the run tracks the latest generation automatically. Do **not** dispatch bounty workers on `fable`: it resolves to the session's own flagship model and burns the interactive session's usage budget for background fan-out work that the cheaper tiers handle. Pass an explicit tier for every worker; never let a worker inherit the orchestrator's session model.
+
+**Effort levels.** `--effort-*` accepts `low`, `medium`, `high`, `xhigh` or `max` and is passed as the Agent tool's `effort` on every dispatch in that phase. Pass an explicit effort on every worker. Persist the resolved values in `config.json` as `effort_hunt`, `effort_vote`, `effort_plan`, `effort_fix` and `effort_review` (`null` when unset) so resumed runs keep them. `xhigh` and `max` multiply cost across a fan-out, so reserve them for small scopes.
 
 If no scope is given, ask the user once whether to scope the hunt.
 
@@ -470,7 +477,7 @@ Rules that apply to every phase below:
 
 ## Phase 1: Shared recon
 
-Spawn **1 recon agent** in an isolated worktree (`isolation: "worktree"`, `model: "sonnet", effort: "medium"`, `run_in_background: false`). Its job: produce a shared briefing that every hunter receives as cached context.
+Spawn **1 recon agent** in an isolated worktree (`isolation: "worktree"`, `model: $MODEL_HUNT, effort: $EFFORT_HUNT` (defaults `sonnet`, `medium`), `run_in_background: false`). Its job: produce a shared briefing that every hunter receives as cached context.
 
 **Scale the time budget by scope size**:
 
@@ -508,7 +515,7 @@ Collisions between hunters on the same lens are the *point* — two independent 
 **Dispatch all N×K hunters in a single message**, each with:
 - `isolation: "worktree"`
 - `name: "hunter-<lens>-<seed>"` (so they are addressable later; seed defaults to `1` when K=1)
-- `model: "sonnet", effort: "medium"` (or `$MODEL_HUNT`): **all** hunters run at the hunt tier regardless of seed index, since the second and third hunters exist to cheaply cross-check, not to duplicate at a higher tier
+- `model: $MODEL_HUNT, effort: $EFFORT_HUNT` (defaults `sonnet`, `medium`): **all** hunters run at the hunt tier regardless of seed index, since the second and third hunters exist to cheaply cross-check, not to duplicate at a higher tier
 - `run_in_background: true`
 - `subagent_type: "general-purpose"` (unless a specialist subagent fits — e.g. `moo-security-reviewer` for the security lens)
 
@@ -635,7 +642,7 @@ When the surviving claims are mostly subtle correctness bugs (concurrency, state
 
 ### Panel-mode dispatch
 
-Dispatch all N panel voters in a single message. Each voter's prompt gets the full list of claims (JSON objects, cited excerpts inline) *except those filed by the voter's own lens* and writes verdicts to one JSONL file:
+Dispatch all N panel voters in a single message using `model: $MODEL_VOTE, effort: $EFFORT_VOTE` (defaults `haiku`, `medium`). Each voter's prompt gets the full list of claims (JSON objects, cited excerpts inline) *except those filed by the voter's own lens* and writes verdicts to one JSONL file:
 
 ```
 $STATE_DIR/votes/VOTER-<lens>.jsonl
@@ -647,7 +654,7 @@ Tally by reading every `VOTER-*.jsonl` file and grouping lines by `bug_id`. Writ
 
 ### Full-mode dispatch
 
-For each surviving claim, the **other N−1 agents** vote. Dispatch all voters for a given claim **in a single message** using `model: $MODEL_VOTE` (default `haiku`).
+For each surviving claim, the **other N−1 agents** vote. Dispatch all voters for a given claim **in a single message** using `model: $MODEL_VOTE, effort: $EFFORT_VOTE` (defaults `haiku`, `medium`).
 
 Each voter prompt includes:
 - The claim JSON
@@ -663,7 +670,7 @@ If any voter call returns a rate-limit / usage-cap error (common with haiku at s
 
 1. Announce once: `⚠ haiku rate-limited; falling back to sonnet for remaining voters this phase`
 2. Persist the fallback in `$STATE_DIR/config.json` as `model_vote_effective: "sonnet"` so resumed runs don't re-probe
-3. Retry the failed voter with sonnet
+3. Retry the failed voter with sonnet at `$EFFORT_VOTE`
 4. Keep going — do not hard-fail the phase on a voter-tier rate limit
 
 ### Live tailing during voting
@@ -725,7 +732,7 @@ The orchestrator enforces the contract: after a PoC agent returns, it runs `git 
 For each eligible CONFIRMED claim:
 
 - `isolation: "worktree"` — one read-only worktree per PoC, off `origin/main`
-- `model: "sonnet", effort: "medium"` (same tier as the hunt, since the PoC is a specialized re-read, not a code-write)
+- `model: $MODEL_HUNT, effort: $EFFORT_HUNT` (defaults `sonnet`, `medium`; same tier as the hunt, since the PoC is a specialized re-read, not a code-write)
 - `name: "poc-<BUG-ID>"`
 - `run_in_background: true`
 - prompt receives: the full claim JSON, the cited file + ±20 lines of context, the recon report, the repo's run/validation commands (from `CLAUDE.md` / `AGENTS.md`), `$POC_DIR`, `$STATE_DIR`, and the hard-rules block above verbatim
@@ -842,7 +849,7 @@ The `tdd?`/`architectural?` marker is a *guess* used only to prepare the reviewe
 
 Dispatch all planners in a single message:
 - `isolation: "worktree"` — planners only **read**, but worktree isolation keeps their read state consistent
-- `model: "opus", effort: "medium"` (or `$MODEL_PLAN`)
+- `model: $MODEL_PLAN, effort: $EFFORT_PLAN` (defaults `opus`, `medium`)
 - `name: "planner-<bundle>"`
 - `run_in_background: true`
 
@@ -873,7 +880,7 @@ Poll `$STATE_DIR/plans/` for new files between dispatch and the planners' comple
 
 After all plans are written, dispatch implementers in a single message:
 - `isolation: "worktree"` — one worktree per bundle, branch `bounty/<run_id>/<bundle>` off `origin/main` (not the user's local `main` — `origin/main` is the canonical base so a stale local `main` does not contaminate the bundle)
-- `model: "sonnet", effort: "medium"` (or `$MODEL_FIX`)
+- `model: $MODEL_FIX, effort: $EFFORT_FIX` (defaults `sonnet`, `medium`)
 - `name: "implementer-<bundle>"`
 - `run_in_background: true`
 
@@ -895,8 +902,8 @@ Tail `$STATE_DIR/fixes/` on the same ~30s cycle and print the fix-committed one-
 ### Step 4d: Bundle review (1 reviewer per bundle)
 
 After an implementer finishes its bundle, dispatch **1 reviewer**:
-- `model: "haiku", effort: "high"` when the plan's frontmatter says `test_strategy: tdd` (the passing tests are most of the evidence)
-- `model: "sonnet", effort: "medium"` when `test_strategy: architectural` (review needs judgment)
+- `model: "haiku", effort: $EFFORT_REVIEW` (default `high`) when the plan's frontmatter says `test_strategy: tdd` (the passing tests are most of the evidence)
+- `model: "sonnet", effort: $EFFORT_REVIEW` (default `medium`) when `test_strategy: architectural` (review needs judgment)
 - `name: "reviewer-<bundle>"`
 - `isolation: "worktree"` (checks out `bounty/<run_id>/<bundle>`)
 - Reviewer may not be the planner or implementer of this bundle. Prefer a specialist whose lens is adjacent but not represented among the bundle's original finders.
@@ -920,7 +927,7 @@ The reviewer inspects each per-bug commit on the bundle branch and returns one v
 
 Resolution per bug:
 - `APPROVE` → fix kept on the bundle branch, implementer gets **+1**
-- `REJECT` → revert that single commit on the bundle branch (`git revert <sha>`); the bug returns to the queue for **one** isolated retry by a different agent (per-bug fix, opus), then abandoned if still rejected
+- `REJECT` → revert that single commit on the bundle branch (`git revert <sha>`); the bug returns to the queue for **one** isolated retry by a different agent (per-bug fix, opus at `$EFFORT_FIX`), then abandoned if still rejected
 
 Print the bundle-review one-liner per bug and re-render the leaderboard after each change.
 

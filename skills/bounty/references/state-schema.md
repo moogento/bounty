@@ -59,6 +59,11 @@ The **per-repo** dismissed list lives outside `$STATE_DIR` so it survives across
   "model_vote_effective": "haiku",
   "model_plan": "opus",
   "model_fix": "sonnet",
+  "effort_hunt": "medium",
+  "effort_vote": "medium",
+  "effort_plan": "medium",
+  "effort_fix": "medium",
+  "effort_review": null,
   "user_fix_scope": "all",
   "started_at": "2026-04-19T14:22:00Z",
   "specialists": ["security", "concurrency", "performance", "nullsafety",
@@ -230,6 +235,7 @@ Written by the bundle reviewer after Step 4d. One verdict per bug in the bundle.
   "bundle": "fix-acl",
   "reviewer": "errorhandling",
   "reviewer_model": "haiku",
+  "reviewer_effort": "high",
   "reviewed_at": "2026-04-19T15:30:00Z",
   "verdicts": [
     {"bug_id": "BUG-authz-1-001", "verdict": "APPROVE", "reason": "ACL entry + controller guard; test covers the path."},
@@ -313,6 +319,7 @@ Written by the Phase 3.5 PoC agent (one per eligible CONFIRMED claim). The artif
   "expected_after_fix": "Returns 400; prepared-statement binding rejects the quoted payload",
   "elapsed_seconds": 47,
   "model": "sonnet",
+  "effort": "medium",
   "status": "completed",
   "at": "2026-04-19T14:55:02Z"
 }
