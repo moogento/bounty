@@ -20,7 +20,7 @@ For fixing a *known* bug, use [`zap`](https://github.com/obra/zap) - `bounty` is
 | **P3 Vote** | For each claim, the other 7 call VALID / FALSE_POSITIVE / ABSTAIN | N−1 per claim | Haiku |
 | **P3.5 PoC** | High/critical confirmed claims get a proof-of-concept; fails reproduce → demoted to FP | 1 per high+ claim | Sonnet |
 | **P4 Queue** | Confirmed finds queued, severity-policed (criticals → GitHub issue, rest → auto-fix) | - | - |
-| **P5 Fix** | Top 3 fixes implemented in parallel; 2 blind reviewers must approve each | up to 3 | Opus |
+| **P5 Fix** | Top 3 fixes implemented in parallel; 2 blind reviewers must approve each | up to 3 | Opus (plan), Sonnet (fix) |
 | **P6 Ship** | Approved fixes cherry-picked onto one branch, scanned for secrets, → PR via `gh` | - | - |
 
 Every agent runs in its own git worktree. Claims, votes, and fixes are all JSON on disk - the run is resumable and the leaderboard is real.
@@ -43,7 +43,10 @@ Options:
 | `--poc <mode>` | P3.5 PoC gate: `auto` = high/critical only (default), `always`, or `off`. A PoC that won't reproduce demotes the claim to FP. |
 | `--no-secrets-scan` | Disable the Step 5b.5 diff-level secrets scan. Default: on — a hit blocks that PR only. |
 | `--model-hunt <tier>` | Override hunter model (default: `sonnet`) |
-| `--model-fix <tier>` | Override fixer model (default: `opus`) |
+| `--model-vote <tier>` | Override voter model (default: `haiku`) |
+| `--model-plan <tier>` | Override planner model (default: `opus`) |
+| `--model-fix <tier>` | Override fixer model (default: `sonnet`) |
+| `--effort-hunt`, `--effort-vote`, `--effort-plan`, `--effort-fix`, `--effort-review <level>` | Override effort per phase (`low` to `max`; default `medium`, tdd reviewers `high`) |
 
 Examples:
 
@@ -69,7 +72,7 @@ Claude will figure out the scope and kick off the hunt.
 
 **Shallow claims cost you.** +1 for a confirmed bug. **−3** when the majority calls your claim bogus. The penalty is deliberately harsh: submitting junk should hurt more than finding real treasure rewards. Quality over quantity, enforced by the accountant.
 
-**Cheap where it should be.** Voting is a yes-or-no verdict - runs on Haiku, pennies per call. Hunting runs on Sonnet. Only the actual code-writing hits Opus. A full 8-agent run costs roughly a quarter of the naive "everything on one model" approach.
+**Cheap where it should be.** Voting is a yes-or-no verdict - runs on Haiku, pennies per call. Hunting and fixing run on Sonnet. Only bundle planning hits Opus. A full 8-agent run costs roughly a quarter of the naive "everything on one model" approach.
 
 **Nobody stomps anybody.** Every hunter and fixer works in its own isolated git worktree. Builds, tests, and diagnostic logging run in parallel without tripping over each other.
 
@@ -170,8 +173,9 @@ A default run (8 agents, 40-claim cap, fixing on):
 | Hunt | 8 parallel | Sonnet | medium |
 | Vote | up to 280 calls | Haiku | small (cheap per call) |
 | PoC | up to ~15 (high/critical only) | Sonnet | small-medium |
-| Fix | up to 10 | Opus | **largest** |
-| Review | up to 20 | Sonnet | medium |
+| Plan | 1 per bundle (max 6) | Opus | **largest** |
+| Fix | 1 per bundle (max 6) | Sonnet | medium-large |
+| Review | 1 per bundle (max 6) | Haiku (tdd) or Sonnet | small-medium |
 
 `--no-fix` keeps everything in the Sonnet/Haiku tier for report-only runs.
 

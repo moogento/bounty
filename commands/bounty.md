@@ -1,6 +1,6 @@
 ---
 description: Run a competitive multi-agent bug bounty across the codebase
-argument-hint: "[--scope <path>] [--agents N] [--severity low|medium|high|critical] [--max-claims N] [--no-fix] [--fresh|--resume] [--max-bugs-per-pr N] [--max-lines-per-pr N] [--poc auto|always|off] [--no-secrets-scan]"
+argument-hint: "[--scope <path>] [--agents N] [--severity low|medium|high|critical] [--max-claims N] [--no-fix] [--fresh|--resume] [--max-bugs-per-pr N] [--max-lines-per-pr N] [--poc auto|always|off] [--no-secrets-scan] [--model-hunt|vote|plan|fix <tier>] [--effort-hunt|vote|plan|fix|review <level>]"
 allowed-tools: Task, Bash, Read, Write, Edit, Glob, Grep, Skill
 ---
 
